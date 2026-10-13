@@ -293,67 +293,13 @@ def path_spaces_error(path: Path | str) -> str:
 
 
 def find_python3_executable() -> Path | None:
-    """
-    Resolve a real python.exe for CMake FindPython3.
-    `py.exe` alone is not enough; glslang's StandAlone CMake needs Python3_EXECUTABLE.
-    """
-    candidates: list[Path] = []
-    for name in ("python", "python3"):
-        hit = shutil.which(name)
-        if hit:
-            candidates.append(Path(hit))
-    # Windows py launcher -> actual interpreter
-    py = shutil.which("py")
-    if py:
-        try:
-            p = subprocess.run(
-                [py, "-3", "-c", "import sys; print(sys.executable)"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-                shell=False,
-            )
-            line = (p.stdout or "").strip().splitlines()
-            if p.returncode == 0 and line:
-                candidates.append(Path(line[0].strip()))
-        except Exception:
-            pass
-    # Frozen launcher still has a host Python for build tools if installed
-    if not getattr(sys, "frozen", False) and sys.executable:
-        candidates.append(Path(sys.executable))
+    """Resolve python.exe via setup_engine (PATH refresh + registry + common folders)."""
+    try:
+        from setup_engine import find_python3_executable as _find
 
-    seen: set[str] = set()
-    for cand in candidates:
-        try:
-            resolved = cand.resolve()
-        except Exception:
-            resolved = cand
-        key = str(resolved).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        name = resolved.name.lower()
-        if name in ("py.exe", "py"):
-            continue
-        if not resolved.is_file():
-            continue
-        try:
-            p = subprocess.run(
-                [str(resolved), "-c", "import sys; print(sys.version_info[0])"],
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=15,
-                shell=False,
-            )
-            if p.returncode == 0 and (p.stdout or "").strip().startswith("3"):
-                return resolved
-        except Exception:
-            continue
-    return None
+        return _find()
+    except Exception:
+        return None
 
 
 def tool_env() -> dict:
@@ -1060,9 +1006,12 @@ def api_rebuild():
             {
                 "ok": False,
                 "error": (
-                    "Python 3 was not found on PATH. CMake needs it for glslang during Build. "
-                    "Open Setup → Install / repair everything, then try Build again. "
-                    "If Python is already installed, close and reopen the launcher so PATH updates."
+                    "No usable python.exe found (CMake/glslang need it for Build). "
+                    "Checked refreshed PATH, the py launcher, registry InstallPath, and common folders. "
+                    "Often this is a PATH/install issue (Microsoft Store stub, or install without "
+                    "'Add python.exe to PATH'), not missing admin rights. "
+                    "Open Setup → Install / repair, or install Python 3.12 from python.org with PATH enabled, "
+                    "then fully quit and restart the launcher."
                 ),
             }
         ), 400
@@ -1071,7 +1020,9 @@ def api_rebuild():
         return jsonify({"ok": False, "error": path_spaces_error(get_repo_root())}), 400
     src, build, how = paths
     cores = str(os.cpu_count() or 4)
-    preamble: list[str] = [f"Using Python for CMake: {python_exe}"]
+    py_cmake = python_exe.resolve().as_posix()
+    py_root = python_exe.resolve().parent.as_posix()
+    preamble: list[str] = [f"Using Python for CMake: {py_cmake}"]
     if how != "direct":
         label = "Windows short path" if how == "short-path" else "space-free junction"
         preamble.append(
@@ -1092,7 +1043,9 @@ def api_rebuild():
             append_job("")
             append_job(
                 "CMake could not find Python 3 (needed by glslang). "
-                "Run Setup → Install / repair, ensure python.exe is on PATH, then Build again."
+                "Usually PATH or a Store stub, not admin rights. "
+                "Setup → Install / repair, or install Python from python.org with PATH enabled, "
+                "then fully quit and restart the launcher."
             )
 
     run_job(
@@ -1109,8 +1062,8 @@ def api_rebuild():
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DCMAKE_C_COMPILER=gcc",
                 "-DCMAKE_CXX_COMPILER=g++",
-                f"-DPython3_EXECUTABLE={python_exe}",
-                f"-DPython3_ROOT_DIR={python_exe.parent}",
+                f"-DPython3_EXECUTABLE={py_cmake}",
+                f"-DPython3_ROOT_DIR={py_root}",
             ],
             ["cmake", "--build", str(build), "--parallel", cores],
             ["cmake", "--build", str(build), "--target", "libs", "--parallel", cores],

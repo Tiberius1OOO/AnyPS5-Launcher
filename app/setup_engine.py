@@ -315,6 +315,158 @@ def which(name: str) -> str | None:
     return shutil.which(name)
 
 
+def _python_looks_usable(exe: Path) -> bool:
+    """Reject WindowsApps stubs / broken installs; require a working Python 3."""
+    try:
+        resolved = exe.resolve()
+    except Exception:
+        resolved = exe
+    if not resolved.is_file():
+        return False
+    low = str(resolved).lower()
+    if "\\windowsapps\\" in low or low.endswith("\\py.exe"):
+        return False
+    try:
+        p = subprocess.run(
+            [str(resolved), "-c", "import sys; print(f'{sys.version_info[0]}.{sys.version_info[1]}')"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=20,
+            shell=False,
+        )
+        out = (p.stdout or "").strip().splitlines()
+        if p.returncode != 0 or not out:
+            return False
+        # Accept 3.x
+        return out[0].startswith("3.")
+    except Exception:
+        return False
+
+
+def _registry_python_executables() -> list[Path]:
+    out: list[Path] = []
+    if os.name != "nt":
+        return out
+    try:
+        import winreg
+    except ImportError:
+        return out
+
+    roots = (
+        (winreg.HKEY_CURRENT_USER, r"Software\Python\PythonCore"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\Python\PythonCore"),
+        (winreg.HKEY_LOCAL_MACHINE, r"Software\WOW6432Node\Python\PythonCore"),
+    )
+    for hive, base in roots:
+        try:
+            with winreg.OpenKey(hive, base) as core:
+                i = 0
+                while True:
+                    try:
+                        ver = winreg.EnumKey(core, i)
+                        i += 1
+                    except OSError:
+                        break
+                    try:
+                        with winreg.OpenKey(core, rf"{ver}\InstallPath") as ip:
+                            for value_name in ("ExecutablePath", None):
+                                try:
+                                    if value_name is None:
+                                        val, _ = winreg.QueryValueEx(ip, None)
+                                    else:
+                                        val, _ = winreg.QueryValueEx(ip, value_name)
+                                except OSError:
+                                    continue
+                                raw = str(val or "").strip().strip('"')
+                                if not raw:
+                                    continue
+                                p = Path(raw)
+                                if p.is_dir():
+                                    p = p / "python.exe"
+                                if p.name.lower() == "python.exe" or p.suffix.lower() == ".exe":
+                                    out.append(p)
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    return out
+
+
+def _common_python_executables() -> list[Path]:
+    out: list[Path] = []
+    local = Path(os.environ.get("LOCALAPPDATA") or "") / "Programs" / "Python"
+    if local.is_dir():
+        out.extend(sorted(local.glob("Python3*/python.exe"), reverse=True))
+        out.extend(sorted(local.glob("Python*/python.exe"), reverse=True))
+    for base in (
+        Path(r"C:\Program Files\Python312"),
+        Path(r"C:\Program Files\Python311"),
+        Path(r"C:\Program Files\Python310"),
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Python312",
+        Path(os.environ.get("ProgramFiles", r"C:\Program Files")) / "Python311",
+        Path(r"C:\Python312"),
+        Path(r"C:\Python311"),
+    ):
+        cand = base / "python.exe" if base.suffix.lower() != ".exe" else base
+        if cand.name.lower() != "python.exe":
+            cand = base / "python.exe"
+        out.append(cand)
+    return out
+
+
+def find_python3_executable() -> Path | None:
+    """
+    Find a real python.exe for CMake FindPython3 / glslang.
+    Reloads PATH from the registry first (important for the frozen .exe).
+    """
+    refresh_path()
+    candidates: list[Path] = []
+
+    for name in ("python", "python3"):
+        hit = which(name)
+        if hit:
+            candidates.append(Path(hit))
+
+    py = which("py")
+    if py:
+        try:
+            p = subprocess.run(
+                [py, "-3", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=20,
+                shell=False,
+            )
+            line = (p.stdout or "").strip().splitlines()
+            if p.returncode == 0 and line:
+                candidates.append(Path(line[0].strip()))
+        except Exception:
+            pass
+
+    candidates.extend(_registry_python_executables())
+    candidates.extend(_common_python_executables())
+
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            key = str(cand.resolve()).lower()
+        except Exception:
+            key = str(cand).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        if _python_looks_usable(cand):
+            try:
+                return cand.resolve()
+            except Exception:
+                return cand
+    return None
+
+
 def run(
     args: list[str],
     log: LogFn | None = None,
@@ -660,16 +812,29 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
     else:
         add(CheckItem("git", "Git", "missing", "Not installed (needed to clone AnyPS5)", required=True))
 
-    # Python
-    py = which("python") or which("py")
-    if py:
-        if which("python"):
-            code, ver = run(["python", "--version"], log=None)
-        else:
-            code, ver = run(["py", "-3", "--version"], log=None)
-        add(CheckItem("python", "Python 3", "ok", _short_ver(ver, "Found"), required=True))
+    # Python (must be a real python.exe CMake/glslang can use - not only py.exe / Store stub)
+    py_exe = find_python3_executable()
+    if py_exe is not None:
+        code, ver = run([str(py_exe), "--version"], log=None)
+        add(
+            CheckItem(
+                "python",
+                "Python 3",
+                "ok",
+                _short_ver(ver, str(py_exe)),
+                required=True,
+            )
+        )
     else:
-        add(CheckItem("python", "Python 3", "missing", "Not installed (tools / scripts)", required=True))
+        add(
+            CheckItem(
+                "python",
+                "Python 3",
+                "missing",
+                "No usable python.exe (PATH/registry). Needed for Build/glslang. Run Install / repair.",
+                required=True,
+            )
+        )
 
     # CMake
     cmake = which("cmake")
@@ -960,19 +1125,33 @@ def ensure_git(log: LogFn) -> bool:
 
 
 def ensure_python(log: LogFn) -> bool:
-    if which("python") or which("py"):
-        _log(log, "[OK] Python bereits vorhanden")
+    refresh_path()
+    exe = find_python3_executable()
+    if exe is not None:
+        _log(log, f"[OK] Python: {exe}")
+        add_user_path(exe.parent, log)
         return True
-    _log(log, "==> Installiere Python 3...")
+    _log(log, "==> Installiere Python 3 (winget Python.Python.3.12)...")
     if install_winget_package("Python.Python.3.12", log):
         refresh_path()
-        if which("python") or which("py"):
+        exe = find_python3_executable()
+        if exe is not None:
+            add_user_path(exe.parent, log)
+            _log(log, f"[OK] Python after install: {exe}")
             return True
     if install_choco_package("python", log):
         refresh_path()
-        if which("python") or which("py"):
+        exe = find_python3_executable()
+        if exe is not None:
+            add_user_path(exe.parent, log)
+            _log(log, f"[OK] Python after install: {exe}")
             return True
-    _log(log, "[ABBRUCH] Python-Installation fehlgeschlagen.")
+    _log(
+        log,
+        "[ABBRUCH] Python 3 not found after install. "
+        "Install from https://www.python.org/downloads/ (tick 'Add python.exe to PATH'), "
+        "then close and reopen the launcher.",
+    )
     return False
 
 
