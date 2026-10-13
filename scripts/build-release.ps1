@@ -81,6 +81,18 @@ if (-not (Test-Path (Join-Path $built "AnyPS5Launcher.exe"))) {
 
 Write-Host "==> Stage release folder..." -ForegroundColor Cyan
 Copy-Item -Recurse -Force (Join-Path $built "*") $stage
+# Never ship local runtime state or a cloned AnyPS5 tree
+@(
+    "launcher-config.json",
+    "setup-state.json",
+    "input-profile.json",
+    "anyps5-input.ini",
+    "AnyPS5"
+) | ForEach-Object {
+    $p = Join-Path $stage $_
+    if (Test-Path $p) { Remove-Item -Recurse -Force $p }
+}
+
 # Release Start script: exe is beside the cmd
 @"
 @echo off

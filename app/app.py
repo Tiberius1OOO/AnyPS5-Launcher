@@ -34,27 +34,39 @@ INPUT_PROFILE_PATH = DATA_DIR / "input-profile.json"
 
 
 def _is_anyps5_tree(path: Path) -> bool:
-    return (path / ".git").exists() or (path / "CMakeLists.txt").is_file()
+    try:
+        return (path / ".git").exists() or (path / "CMakeLists.txt").is_file()
+    except Exception:
+        return False
 
 
 def detect_default_anyps5_root() -> Path:
-    """AnyPS5 lives inside the folder where this launcher is running from."""
+    """Always AnyPS5 next to the running launcher (local scope for GitHub users)."""
     env = str(os.environ.get("ANYPS5_ROOT") or "").strip().strip('"')
     if env:
         return Path(env)
-    # Frozen: next to AnyPS5Launcher.exe. Source: next to app/ (project run dir).
     return (DATA_DIR / "AnyPS5").resolve()
 
 
 def get_repo_root() -> Path:
     cfg = load_config()
     raw = str(cfg.get("anyps5Root") or "").strip().strip('"')
+    local = detect_default_anyps5_root()
     if raw:
-        return Path(raw)
-    detected = detect_default_anyps5_root()
-    cfg["anyps5Root"] = str(detected)
+        chosen = Path(raw)
+        # Keep installs inside the launcher folder unless ANYPS5_ROOT was set.
+        # (Ignore old configs that pointed at a sibling tree elsewhere.)
+        if not str(os.environ.get("ANYPS5_ROOT") or "").strip():
+            try:
+                chosen.resolve().relative_to(DATA_DIR.resolve())
+            except ValueError:
+                cfg["anyps5Root"] = str(local)
+                save_config(cfg)
+                return local
+        return chosen
+    cfg["anyps5Root"] = str(local)
     save_config(cfg)
-    return detected
+    return local
 
 
 def get_build_dir() -> Path:

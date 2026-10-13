@@ -613,9 +613,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             "admin",
             "Administrator rights",
             "ok" if admin else "warn",
-            "Yes"
-            if admin
-            else "This window is non-admin (normal). Use Install with admin only if tools are missing.",
+            "Yes" if admin else "Non-admin window (normal).",
             required=False,
             fixable=True,
         )
@@ -628,7 +626,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             "winget",
             "winget",
             "ok" if winget else "warn",
-            winget or "Not found - Chocolatey/manual fallback",
+            "Found" if winget else "Not found - Chocolatey/manual fallback",
             required=False,
         )
     )
@@ -640,16 +638,25 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             "choco",
             "Chocolatey",
             "ok" if choco else "warn",
-            choco or "Optional",
+            "Found" if choco else "Optional",
             required=False,
         )
     )
+
+    def _short_ver(raw: str | None, fallback: str = "Found") -> str:
+        line = (raw or "").splitlines()[0].strip() if raw else ""
+        if not line:
+            return fallback
+        # Avoid dumping long absolute paths into the checklist UI
+        if len(line) > 72 or (":\\" in line and "version" not in line.lower()):
+            return fallback
+        return line
 
     # Git
     git = which("git")
     if git:
         code, ver = run(["git", "--version"], log=None)
-        add(CheckItem("git", "Git", "ok", ver or git, required=True))
+        add(CheckItem("git", "Git", "ok", _short_ver(ver, "Found"), required=True))
     else:
         add(CheckItem("git", "Git", "missing", "Not installed (needed to clone AnyPS5)", required=True))
 
@@ -660,7 +667,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             code, ver = run(["python", "--version"], log=None)
         else:
             code, ver = run(["py", "-3", "--version"], log=None)
-        add(CheckItem("python", "Python 3", "ok", ver or py, required=True))
+        add(CheckItem("python", "Python 3", "ok", _short_ver(ver, "Found"), required=True))
     else:
         add(CheckItem("python", "Python 3", "missing", "Not installed (tools / scripts)", required=True))
 
@@ -673,9 +680,9 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
         code, ver = run([cmake, "--version"], log=None)
         pv = parse_cmake_version(ver)
         if pv and pv >= MIN_CMAKE:
-            add(CheckItem("cmake", "CMake", "ok", ver.splitlines()[0] if ver else cmake, required=True))
+            add(CheckItem("cmake", "CMake", "ok", _short_ver(ver, "Found"), required=True))
         else:
-            add(CheckItem("cmake", "CMake", "warn", f"Too old or unknown: {ver}", required=True))
+            add(CheckItem("cmake", "CMake", "warn", f"Too old or unknown: {_short_ver(ver, 'unknown')}", required=True))
     else:
         add(CheckItem("cmake", "CMake", "missing", ">= 3.22.1 required", required=True))
 
@@ -683,7 +690,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
     ninja = which("ninja")
     if ninja:
         code, ver = run(["ninja", "--version"], log=None)
-        add(CheckItem("ninja", "Ninja", "ok", ver or ninja, required=True))
+        add(CheckItem("ninja", "Ninja", "ok", _short_ver(ver and f"ninja {ver}", "Found"), required=True))
     else:
         add(CheckItem("ninja", "Ninja", "missing", "Build generator missing", required=True))
 
@@ -692,14 +699,14 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
     gxx = WINLIBS_ROOT / "mingw64" / "bin" / "g++.exe"
     if gcc.is_file() and gxx.is_file():
         code, ver = run([str(gcc), "--version"], log=None)
-        line = ver.splitlines()[0] if ver else str(gcc)
+        line = ver.splitlines()[0] if ver else ""
         ok = "15.2.0" in line
         add(
             CheckItem(
                 "winlibs",
                 "WinLibs GCC 15.2.0",
                 "ok" if ok else "warn",
-                line,
+                "gcc 15.2.0" if ok else (line or "Found"),
                 required=True,
             )
         )
@@ -808,7 +815,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
     # Build artifacts (optional) - never a Setup install failure
     relinker = repo_root / "build" / "core" / "relinker" / "relinker.exe"
     if relinker.is_file():
-        add(CheckItem("build", "AnyPS5 Build", "ok", str(relinker), required=False, fixable=True))
+        add(CheckItem("build", "AnyPS5 Build", "ok", "relinker.exe present", required=False, fixable=True))
     elif git_dir.exists():
         add(
             CheckItem(

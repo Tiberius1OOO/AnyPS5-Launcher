@@ -24,6 +24,3 @@ app/anyps5-input.ini
 .DS_Store
 Thumbs.db
 *.log
-
-# Patch helpers (dev only)
-scripts/_patch_*.py
