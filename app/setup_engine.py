@@ -738,6 +738,18 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                 )
             )
 
+    # Paths with spaces break MinGW windres during Build (include -I split on space)
+    if " " in str(repo_root):
+        add(
+            CheckItem(
+                "path_spaces",
+                "Install path (no spaces)",
+                "warn",
+                f"Path has spaces ({repo_root}). Move the launcher to e.g. C:\\Games\\AnyPS5-Launcher before Build, or Build will try Windows short paths.",
+                required=False,
+            )
+        )
+
     # Repo / git remote - "todo" = expected next Setup step, not a broken install
     git_dir = repo_root / ".git"
     if git_dir.exists():

@@ -43,6 +43,11 @@ On Setup: **ok** = already present, **next** = still required.
 - Game folder needs `eboot.bin` or another `.elf`, plus modules such as `sce_module`.
 - Use the **?** tips on Convert options for GPU filter, Intel CPU, and cleanup level.
 
+## Path tip
+
+Put the launcher in a folder **without spaces** in the path (example: `C:\Games\AnyPS5-Launcher`).  
+Paths like `...\HYDERA LUNCHER\...` break MinGW `windres` during Build.
+
 ## Build from source
 
 Python 3.11+ on Windows:

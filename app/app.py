@@ -140,6 +140,73 @@ def save_config(cfg: dict) -> None:
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
+def path_has_spaces(path: Path | str) -> bool:
+    return " " in str(path)
+
+
+def windows_short_path(path: Path) -> Path | None:
+    """Return 8.3 short path if Windows provides one without spaces (helps MinGW windres)."""
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        get_short = ctypes.windll.kernel32.GetShortPathNameW
+        get_short.argtypes = [wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD]
+        get_short.restype = wintypes.DWORD
+        resolved = str(path.resolve())
+        need = get_short(resolved, None, 0)
+        if need == 0:
+            return None
+        buf = ctypes.create_unicode_buffer(need)
+        if get_short(resolved, buf, need) == 0:
+            return None
+        short = Path(buf.value)
+        if path_has_spaces(short):
+            return None
+        return short
+    except Exception:
+        return None
+
+
+def space_safe_build_paths() -> tuple[Path, Path] | None:
+    """
+    Paths for cmake -S/-B that MinGW windres can digest.
+    windres breaks include paths that contain spaces (splits on the space).
+    Prefer Windows short paths when the real path has spaces.
+    """
+    root = get_repo_root().resolve()
+    build = (root / "build").resolve()
+    if not path_has_spaces(root) and not path_has_spaces(build):
+        return root, build
+    short_root = windows_short_path(root)
+    if short_root is None:
+        return None
+    # Ensure build dir exists so short path can resolve
+    try:
+        build.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        pass
+    short_build = windows_short_path(build)
+    if short_build is None:
+        # Fall back to short_root / "build" (same folder, short prefix)
+        short_build = short_root / "build"
+        if path_has_spaces(short_build):
+            return None
+    return short_root, short_build
+
+
+def path_spaces_error(path: Path | str) -> str:
+    return (
+        "Install path contains spaces, which breaks the MinGW resource compiler (windres) "
+        "used while building AnyPS5. "
+        f"Current path: {path}. "
+        "Move the whole AnyPS5-Launcher folder to a path without spaces "
+        "(example: C:\\Games\\AnyPS5-Launcher), run Setup again if needed, then Build."
+    )
+
+
 def tool_env() -> dict:
     env = os.environ.copy()
     parts = [
@@ -371,20 +438,31 @@ def mark_repo_pulled() -> None:
         append_job("NOTE: Open Build and run Build now after updating.")
 
 
-def run_job(kind: str, commands: list[list[str]], on_success=None) -> None:
+def run_job(
+    kind: str,
+    commands: list[list[str]],
+    on_success=None,
+    *,
+    cwd: Path | None = None,
+    preamble: list[str] | None = None,
+    on_failure=None,
+) -> None:
     if _job["running"]:
         return
 
     def worker() -> None:
         set_job(True, kind=kind, ok=None)
         append_job(f"=== {kind} started ===")
+        for line in preamble or []:
+            append_job(line)
         ok = True
+        workdir = str(cwd or get_repo_root())
         for cmd in commands:
             append_job("> " + " ".join(cmd))
             try:
                 proc = subprocess.Popen(
                     cmd,
-                    cwd=str(get_repo_root()),
+                    cwd=workdir,
                     env=tool_env(),
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
@@ -412,6 +490,11 @@ def run_job(kind: str, commands: list[list[str]], on_success=None) -> None:
                 append_job(f"Post-step failed: {e}")
                 ok = False
         if not ok:
+            if on_failure:
+                try:
+                    on_failure()
+                except Exception:
+                    pass
             note_job_failure_hints()
         append_job("=== done ===" if ok else "=== aborted ===")
         set_job(False, ok=ok)
@@ -775,24 +858,49 @@ def api_rebuild():
         return jsonify({"ok": False, "error": "A job is already running."}), 409
     if not (WINLIBS_BIN / "gcc.exe").is_file():
         return jsonify({"ok": False, "error": "WinLibs GCC missing. Run setup first."}), 400
+    paths = space_safe_build_paths()
+    if paths is None:
+        return jsonify({"ok": False, "error": path_spaces_error(get_repo_root())}), 400
+    src, build = paths
     cores = str(os.cpu_count() or 4)
-    cmds = [
+    preamble: list[str] = []
+    if path_has_spaces(get_repo_root()):
+        preamble.append(
+            "Note: install path contains spaces. Using Windows short paths so MinGW windres works:"
+        )
+        preamble.append(f"  -S {src}")
+        preamble.append(f"  -B {build}")
+
+    def on_build_failure() -> None:
+        with _job_lock:
+            blob = "\n".join(_job.get("lines") or []).lower()
+        if "windres" in blob and ("no such file" in blob or path_has_spaces(get_repo_root())):
+            append_job("")
+            append_job(path_spaces_error(get_repo_root()))
+
+    run_job(
+        "Build",
         [
-            "cmake",
-            "-S",
-            str(get_repo_root()),
-            "-B",
-            str(get_build_dir()),
-            "-G",
-            "Ninja",
-            "-DCMAKE_BUILD_TYPE=Release",
-            "-DCMAKE_C_COMPILER=gcc",
-            "-DCMAKE_CXX_COMPILER=g++",
+            [
+                "cmake",
+                "-S",
+                str(src),
+                "-B",
+                str(build),
+                "-G",
+                "Ninja",
+                "-DCMAKE_BUILD_TYPE=Release",
+                "-DCMAKE_C_COMPILER=gcc",
+                "-DCMAKE_CXX_COMPILER=g++",
+            ],
+            ["cmake", "--build", str(build), "--parallel", cores],
+            ["cmake", "--build", str(build), "--target", "libs", "--parallel", cores],
         ],
-        ["cmake", "--build", str(get_build_dir()), "--parallel", cores],
-        ["cmake", "--build", str(get_build_dir()), "--target", "libs", "--parallel", cores],
-    ]
-    run_job("Build", cmds, on_success=mark_build_current)
+        on_success=mark_build_current,
+        cwd=src,
+        preamble=preamble,
+        on_failure=on_build_failure,
+    )
     return jsonify({"ok": True})
 
 
