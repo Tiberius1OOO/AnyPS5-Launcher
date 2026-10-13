@@ -287,10 +287,14 @@
         <div class="panel-head row-between">
           <div>
             <h2>Console</h2>
-            <p>Live log for install, update, build, and convert.</p>
+            <p>Live log for install, update, build, and convert. On failure, also check the log file below.</p>
           </div>
-          <button class="btn compact" id="btnClearLog" type="button">Clear</button>
+          <div class="action-row" style="margin:0">
+            <button class="btn compact" id="btnOpenLog" type="button">Open log file</button>
+            <button class="btn compact" id="btnClearLog" type="button">Clear</button>
+          </div>
         </div>
+        <p class="hint mono" id="logPathHint">Log file: logs\last-job.log (next to the exe)</p>
         <pre class="console" id="console">Ready.</pre>
       </section>
     </main>

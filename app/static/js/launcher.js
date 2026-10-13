@@ -295,6 +295,9 @@
     $("jobStatus").textContent = job.running
       ? `Running: ${job.kind || "Job"}`
       : (job.ok === false ? "Error" : job.ok === true ? "Done" : "Ready");
+    if ($("logPathHint") && job.logPath) {
+      $("logPathHint").textContent = `Log file: ${job.logPath}`;
+    }
     return job;
   }
 
@@ -312,7 +315,10 @@
           setBusy(false);
           await refresh();
           if (job.ok === true) toast(`${job.kind || "Job"} finished`, "ok");
-          if (job.ok === false) toast(`${job.kind || "Job"} failed. See Console.`, "error");
+          if (job.ok === false) {
+            const logHint = job.logPath ? " Send logs\\last-job.log if you need help." : "";
+            toast(`${job.kind || "Job"} failed. See Console (scroll up for the real error).${logHint}`, "error");
+          }
         }
       } catch (e) {
         clearInterval(pollTimer);
@@ -755,6 +761,14 @@
   on("btnClearLog", "click", () => {
     $("console").textContent = "Ready.";
     lastLineCount = 0;
+  });
+  on("btnOpenLog", "click", async () => {
+    try {
+      const data = await api("/api/logs/open", { method: "POST", body: "{}" });
+      toast(data.path ? `Opened ${data.path}` : "Opened log folder", "ok");
+    } catch (e) {
+      toast(e.message, "error");
+    }
   });
   on("btnSetupAudit", "click", () => runSetupAudit().catch((e) => toast(e.message, "error")));
   on("btnSetupInstall", "click", () => requestSetupInstall());

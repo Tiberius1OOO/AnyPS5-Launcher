@@ -87,7 +87,8 @@ Copy-Item -Recurse -Force (Join-Path $built "*") $stage
     "setup-state.json",
     "input-profile.json",
     "anyps5-input.ini",
-    "AnyPS5"
+    "AnyPS5",
+    "logs"
 ) | ForEach-Object {
     $p = Join-Path $stage $_
     if (Test-Path $p) { Remove-Item -Recurse -Force $p }

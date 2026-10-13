@@ -31,6 +31,8 @@ if str(LAUNCHER_DIR) not in sys.path:
 CONFIG_PATH = DATA_DIR / "launcher-config.json"
 INPUT_INI_PATH = DATA_DIR / "anyps5-input.ini"
 INPUT_PROFILE_PATH = DATA_DIR / "input-profile.json"
+LOGS_DIR = DATA_DIR / "logs"
+LAST_JOB_LOG = LOGS_DIR / "last-job.log"
 
 
 def _is_anyps5_tree(path: Path) -> bool:
@@ -101,6 +103,8 @@ _job: dict = {
     "ok": None,
     "started": None,
     "finished": None,
+    "logPath": str(LAST_JOB_LOG),
+    "logHistoryPath": "",
 }
 
 
@@ -196,11 +200,104 @@ def run_git_one_line(args: list[str]) -> str:
         return ""
 
 
+def _safe_log_name(kind: str) -> str:
+    raw = (kind or "job").strip().lower() or "job"
+    out = "".join(c if (c.isalnum() or c in "-_") else "-" for c in raw)
+    while "--" in out:
+        out = out.replace("--", "-")
+    return out.strip("-") or "job"
+
+
+def _write_job_log_line(line: str) -> None:
+    """Append one line to last-job.log and the dated copy (caller holds lock)."""
+    payload = line + "\n"
+    for key in ("logPath", "logHistoryPath"):
+        raw = str(_job.get(key) or "").strip()
+        if not raw:
+            continue
+        try:
+            path = Path(raw)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("a", encoding="utf-8", errors="replace") as fh:
+                fh.write(payload)
+        except Exception:
+            pass
+
+
+def _reset_job_log(kind: str) -> None:
+    """Start fresh log files for a new job (caller holds lock)."""
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    hist = LOGS_DIR / f"{_safe_log_name(kind)}-{stamp}.log"
+    header = (
+        f"AnyPS5 Launcher job: {kind or 'job'}\n"
+        f"Started (UTC): {datetime.now(timezone.utc).isoformat()}\n"
+        f"Repo: {get_repo_root()}\n"
+        f"{'=' * 60}\n"
+    )
+    _job["logPath"] = str(LAST_JOB_LOG)
+    _job["logHistoryPath"] = str(hist)
+    for path in (LAST_JOB_LOG, hist):
+        try:
+            path.write_text(header, encoding="utf-8")
+        except Exception:
+            pass
+
+
+def _failure_snippets(lines: list[str], limit: int = 12) -> list[str]:
+    keys = (
+        "error",
+        "failed",
+        "fatal",
+        "exception",
+        "undefined reference",
+        "cannot find",
+        "no such file",
+        "cmake error",
+        "ninja: build stopped",
+        "permission denied",
+        "not found",
+    )
+    hits: list[str] = []
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+        low = s.lower()
+        if any(k in low for k in keys):
+            hits.append(s)
+    if hits:
+        return hits[-limit:]
+    # Fall back to the last non-empty lines so the log is still useful
+    nonempty = [ln.strip() for ln in lines if ln.strip()]
+    return nonempty[-min(limit, 8) :]
+
+
+def note_job_failure_hints() -> None:
+    """Append a short summary + log path after a failed job."""
+    with _job_lock:
+        lines = list(_job.get("lines") or [])
+        log_path = str(_job.get("logPath") or LAST_JOB_LOG)
+    snippets = _failure_snippets(lines)
+    append_job("")
+    append_job("The line 'ERROR: exit code …' only means the command failed.")
+    if snippets:
+        append_job("Likely cause (from earlier output):")
+        for s in snippets:
+            append_job(f"  {s}")
+    append_job(f"Full log file (send this if you need help): {log_path}")
+    append_job(f"Log folder: {LOGS_DIR}")
+
+
 def append_job(line: str) -> None:
     with _job_lock:
         _job["lines"].append(line)
         if len(_job["lines"]) > 4000:
             _job["lines"] = _job["lines"][-3000:]
+        _write_job_log_line(line)
 
 
 def set_job(running: bool, kind: str = "", ok: bool | None = None) -> None:
@@ -213,8 +310,11 @@ def set_job(running: bool, kind: str = "", ok: bool | None = None) -> None:
             _job["lines"] = []
             _job["started"] = datetime.now(timezone.utc).isoformat()
             _job["finished"] = None
+            _reset_job_log(kind or _job.get("kind") or "job")
         else:
             _job["finished"] = datetime.now(timezone.utc).isoformat()
+            if not _job.get("logPath"):
+                _job["logPath"] = str(LAST_JOB_LOG)
 
 
 def current_head() -> tuple[str, str]:
@@ -298,7 +398,7 @@ def run_job(kind: str, commands: list[list[str]], on_success=None) -> None:
                     append_job(line.rstrip())
                 code = proc.wait()
                 if code != 0:
-                    append_job(f"ERROR: exit code {code}")
+                    append_job(f"ERROR: exit code {code} ({' '.join(cmd)})")
                     ok = False
                     break
             except Exception as e:
@@ -311,6 +411,8 @@ def run_job(kind: str, commands: list[list[str]], on_success=None) -> None:
             except Exception as e:
                 append_job(f"Post-step failed: {e}")
                 ok = False
+        if not ok:
+            note_job_failure_hints()
         append_job("=== done ===" if ok else "=== aborted ===")
         set_job(False, ok=ok)
 
@@ -604,7 +706,28 @@ def api_readme():
 @app.get("/api/job")
 def api_job():
     with _job_lock:
-        return jsonify(dict(_job))
+        data = dict(_job)
+    data["logPath"] = data.get("logPath") or str(LAST_JOB_LOG)
+    data["logsDir"] = str(LOGS_DIR)
+    return jsonify(data)
+
+
+@app.post("/api/logs/open")
+def api_open_logs():
+    """Open last-job.log (or the logs folder) in Explorer."""
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    target = LAST_JOB_LOG if LAST_JOB_LOG.is_file() else LOGS_DIR
+    try:
+        if target.is_file():
+            subprocess.Popen(["explorer", f"/select,{target}"])
+        else:
+            subprocess.Popen(["explorer", str(LOGS_DIR)])
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "path": str(target), "logsDir": str(LOGS_DIR)})
 
 
 @app.post("/api/browse")
@@ -864,6 +987,7 @@ def api_convert():
                 append_job(line.rstrip())
             if proc.wait() != 0:
                 ok = False
+                append_job("ERROR: exit code from relinker (see output above)")
                 append_job("Relinker failed.")
             else:
                 libs_dest = output_dir / "libs"
@@ -904,6 +1028,8 @@ def api_convert():
         except Exception as e:
             ok = False
             append_job(f"ERROR: {e}")
+        if not ok:
+            note_job_failure_hints()
         append_job("=== done ===" if ok else "=== aborted ===")
         set_job(False, ok=ok)
 
@@ -1023,6 +1149,8 @@ def api_setup_install():
                 finish_progress(False)
             except Exception:
                 pass
+        if not ok:
+            note_job_failure_hints()
         append_job("=== done ===" if ok else "=== aborted ===")
         set_job(False, ok=ok)
 

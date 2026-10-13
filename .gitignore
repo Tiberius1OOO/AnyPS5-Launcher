@@ -17,6 +17,7 @@ venv/
 **/setup-state.json
 **/input-profile.json
 app/anyps5-input.ini
+logs/
 
 # IDE / OS
 .idea/

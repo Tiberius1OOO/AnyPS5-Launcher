@@ -22,6 +22,8 @@ This repository is the launcher only. It does not modify upstream AnyPS5.
 
 Leave the launcher window open while you use the UI.
 
+If Build or Setup fails, open the **Console** tab and scroll up. The useful compiler/CMake lines are above `ERROR: exit code …`. A full copy is also written to `logs\last-job.log` next to the exe (use **Open log file** on the Console tab).
+
 ## Tabs
 
 | Tab | Purpose |
