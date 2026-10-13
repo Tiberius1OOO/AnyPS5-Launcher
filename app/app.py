@@ -917,7 +917,7 @@ def api_start():
 
 @app.get("/api/setup/audit")
 def api_setup_audit():
-    from setup_engine import audit, get_progress
+    from setup_engine import audit, get_progress, is_admin
 
     lines: list[str] = []
     report = audit(get_repo_root(), log=lines.append)
@@ -927,12 +927,15 @@ def api_setup_audit():
             "audit": report.to_dict(),
             "log": lines,
             "progress": get_progress(),
+            "launcherIsAdmin": is_admin(),
+            "installTarget": str(get_repo_root()),
             "adminWhy": {
                 "title": "Why administrator access may be needed",
                 "body": (
                     "Installing Git, Python, or CMake usually writes into Program Files. "
                     "WinLibs is extracted under C:\\winlibs. winget package installs often "
-                    "require elevation. The launcher itself does not need admin to run."
+                    "require elevation. This launcher window stays non-admin; UAC only elevates "
+                    "the installer helper. If tools are already installed, you can install without admin."
                 ),
             },
         }
@@ -957,13 +960,15 @@ def api_setup_install():
     # allowWithoutAdmin: proceed without UAC (may fail on Program Files / C:\winlibs)
 
     if elevate:
-        # Relaunch elevated installer in a new console; user confirms UAC
+        # Elevated helper installs tools into Program Files / C:\winlibs.
+        # This UI process stays non-admin; user must Re-check afterwards.
         ps1 = LAUNCHER_DIR / "bootstrap.ps1"
         if not ps1.is_file():
             return jsonify({"ok": False, "error": "bootstrap.ps1 missing"}), 500
         try:
             root = get_repo_root()
             root.mkdir(parents=True, exist_ok=True)
+            # Full install (not LauncherOnly) so clone + tools run elevated
             subprocess.Popen(
                 [
                     "powershell",
@@ -971,7 +976,7 @@ def api_setup_install():
                     "-ExecutionPolicy",
                     "Bypass",
                     "-Command",
-                    f"Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{ps1}\" -RepoRoot \"{root}\" -Elevated -NoLaunch -LauncherOnly'",
+                    f"Start-Process powershell -Verb RunAs -ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{ps1}\" -RepoRoot \"{root}\" -Elevated -NoLaunch'",
                 ],
                 cwd=str(DATA_DIR),
             )
@@ -979,17 +984,24 @@ def api_setup_install():
                 {
                     "ok": True,
                     "elevated": True,
-                    "message": "UAC prompt opened. After admin install, click Re-check.",
+                    "message": (
+                        "UAC opened an admin installer window. This launcher stays non-admin — "
+                        "when the other window finishes, click Re-check."
+                    ),
                 }
             )
         except Exception as e:
             return jsonify({"ok": False, "error": str(e)}), 500
+
+    # Ensure clone target exists under the launcher folder
+    get_repo_root().mkdir(parents=True, exist_ok=True)
 
     def worker() -> None:
         from setup_engine import finish_progress, full_install
 
         set_job(True, kind="Setup / Installation", ok=None)
         append_job("=== Setup / Installation started ===")
+        append_job(f"Install target: {get_repo_root()}")
         try:
             ok = full_install(get_repo_root(), append_job, steps=steps)
         except Exception as e:

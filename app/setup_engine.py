@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""AnyPS5 setup / installer engine — audit + install with detailed logging."""
+"""AnyPS5 setup / installer engine - audit + install with detailed logging."""
 from __future__ import annotations
 
 import json
@@ -93,39 +93,105 @@ def finish_progress(ok: bool) -> None:
         if ok:
             _progress["detail"] = "Setup finished"
         else:
-            _progress["detail"] = "Setup aborted — see Console for [ABBRUCH] lines"
+            _progress["detail"] = "Setup aborted - see Console for [ABBRUCH] lines"
 
 
-def planned_progress_steps() -> list[dict]:
-    return [
-        {
-            "id": sid,
-            "name": SETUP_STEP_LABELS.get(sid, sid),
-            "status": "pending",
-            "detail": "Waiting — start Install / repair",
+def sync_progress_from_audit(report: "AuditReport") -> dict:
+    """When idle, show real detection state - not fake 'waiting to start' rows."""
+    with _progress_lock:
+        if _progress["running"]:
+            return {
+                "running": True,
+                "current": _progress["current"],
+                "done": _progress["done"],
+                "total": _progress["total"],
+                "ok": _progress["ok"],
+                "detail": _progress["detail"],
+                "steps": [dict(s) for s in _progress["steps"]],
+            }
+
+        by_id = {c.id: c for c in report.checks}
+        steps: list[dict] = []
+        for sid in SETUP_STEP_ORDER:
+            check = by_id.get(sid)
+            label = SETUP_STEP_LABELS.get(sid, sid)
+            if check is None:
+                steps.append(
+                    {"id": sid, "name": label, "status": "pending", "detail": "Not checked"}
+                )
+                continue
+            st = check.status
+            if st == "ok":
+                status, detail = "ok", check.detail or "Detected on this PC"
+            elif st == "todo":
+                status, detail = "todo", check.detail or "Will run on Install"
+            elif st == "missing":
+                status, detail = "missing", check.detail or "Missing - Install will try to fix"
+            elif st == "warn":
+                # Present but imperfect (e.g. wrong GCC) - still detected
+                status, detail = "warn", check.detail or "Detected with warnings"
+            elif st == "error":
+                status, detail = "error", check.detail or "Error"
+            else:
+                status, detail = st, check.detail or ""
+            steps.append({"id": sid, "name": label, "status": status, "detail": detail})
+
+        done = sum(1 for s in steps if s["status"] == "ok")
+        total = len(steps)
+        remaining = total - done
+        if remaining == 0:
+            detail = "Everything detected on this PC - Install is optional (repair)"
+            ok: bool | None = True
+        else:
+            detail = f"{done}/{total} ready - Install handles the rest"
+            ok = None
+
+        _progress["running"] = False
+        _progress["current"] = ""
+        _progress["done"] = done
+        _progress["total"] = total
+        _progress["ok"] = ok
+        _progress["detail"] = detail
+        _progress["steps"] = steps
+        return {
+            "running": False,
+            "current": "",
+            "done": done,
+            "total": total,
+            "ok": ok,
+            "detail": detail,
+            "steps": [dict(s) for s in steps],
         }
-        for sid in SETUP_STEP_ORDER
-    ]
 
 
 def get_progress() -> dict:
     with _progress_lock:
         steps = [dict(s) for s in _progress["steps"]]
         if not steps:
-            steps = planned_progress_steps()
+            # Before first audit: neutral placeholders (audit will replace immediately)
+            steps = [
+                {
+                    "id": sid,
+                    "name": SETUP_STEP_LABELS.get(sid, sid),
+                    "status": "pending",
+                    "detail": "Checking...",
+                }
+                for sid in SETUP_STEP_ORDER
+            ]
             total = len(steps)
             done = 0
+            detail = "Checking this PC..."
         else:
             total = _progress["total"]
             done = _progress["done"]
+            detail = _progress["detail"] or ""
         return {
             "running": _progress["running"],
             "current": _progress["current"],
             "done": done,
             "total": total,
             "ok": _progress["ok"],
-            "detail": _progress["detail"]
-            or ("Install not started yet" if not _progress["running"] and _progress["ok"] is None else ""),
+            "detail": detail,
             "steps": steps,
         }
 
@@ -271,11 +337,11 @@ def add_user_path(directory: Path, log: LogFn | None = None) -> None:
             parts = [p for p in current.split(";") if p]
             norm = str(directory)
             if any(p.rstrip("\\").lower() == norm.rstrip("\\").lower() for p in parts):
-                _log(log, f"  [OK] PATH enthält bereits {norm}")
+                _log(log, f"  [OK] PATH enthaelt bereits {norm}")
                 return
             new = (current + ";" if current else "") + norm
             winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, new)
-            _log(log, f"  [OK] Zu User-PATH hinzugefügt: {norm}")
+            _log(log, f"  [OK] Zu User-PATH hinzugefuegt: {norm}")
     except Exception as e:
         _log(log, f"  [!] PATH konnte nicht gesetzt werden: {e}")
     # session
@@ -330,7 +396,9 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             "admin",
             "Administrator rights",
             "ok" if admin else "warn",
-            "Yes" if admin else "No (some installers need UAC)",
+            "Yes"
+            if admin
+            else "This window is non-admin (normal). Use Install with admin only if tools are missing.",
             required=False,
             fixable=True,
         )
@@ -343,7 +411,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             "winget",
             "winget",
             "ok" if winget else "warn",
-            winget or "Not found — Chocolatey/manual fallback",
+            winget or "Not found - Chocolatey/manual fallback",
             required=False,
         )
     )
@@ -431,7 +499,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                         "winlibs",
                         "WinLibs GCC 15.2.0",
                         "warn",
-                        f"Other GCC found ({line}) — project expects WinLibs 15.2.0",
+                        f"Other GCC found ({line}) - project expects WinLibs 15.2.0",
                         required=True,
                     )
                 )
@@ -446,7 +514,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                 )
             )
 
-    # Repo / git remote — "todo" = expected next Setup step, not a broken install
+    # Repo / git remote - "todo" = expected next Setup step, not a broken install
     git_dir = repo_root / ".git"
     if git_dir.exists():
         code, remote = run(["git", "remote", "get-url", "origin"], cwd=repo_root, log=None)
@@ -468,7 +536,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                 "repo",
                 "AnyPS5 source",
                 "todo",
-                f"Not cloned yet — Install / repair will clone into {repo_root}",
+                f"Not cloned yet - Install / repair will clone into {repo_root}",
                 required=True,
             )
         )
@@ -484,7 +552,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                     "submodules",
                     "Submodules",
                     "todo",
-                    "gitmodules present, 3rdparty empty — Install runs submodule update",
+                    "gitmodules present, 3rdparty empty - Install runs submodule update",
                     required=True,
                 )
             )
@@ -520,7 +588,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
         except ImportError:
             add(CheckItem("flask", "Launcher Python deps", "missing", "pip install flask", required=True))
 
-    # Build artifacts (optional) — never a Setup install failure
+    # Build artifacts (optional) - never a Setup install failure
     relinker = repo_root / "build" / "core" / "relinker" / "relinker.exe"
     if relinker.is_file():
         add(CheckItem("build", "AnyPS5 Build", "ok", str(relinker), required=False, fixable=True))
@@ -530,7 +598,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                 "build",
                 "AnyPS5 Build",
                 "todo",
-                "Source ready — next step is Build → Full Rebuild (not Setup)",
+                "Source ready - next step is Build -> Full Rebuild (not Setup)",
                 required=False,
                 fixable=True,
             )
@@ -541,7 +609,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                 "build",
                 "AnyPS5 Build",
                 "todo",
-                "After Setup clones the source, use Build → Full Rebuild",
+                "After Setup clones the source, use Build -> Full Rebuild",
                 required=False,
                 fixable=True,
             )
@@ -589,6 +657,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
         toolsOk=len(tool_missing) == 0,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
+    sync_progress_from_audit(report)
     _log(log, f"=== Audit done: {len(tool_missing)} tool issue(s), {len(next_steps)} next step(s) ===")
     return report
 
@@ -616,7 +685,7 @@ def install_winget_package(pkg_id: str, log: LogFn, extra: list[str] | None = No
 
 def install_choco_package(name: str, log: LogFn, params: str = "") -> bool:
     if not which("choco"):
-        _log(log, f"[!] choco fehlt — überspringe {name}")
+        _log(log, f"[!] choco fehlt - ueberspringe {name}")
         return False
     # Auto-confirm non-elevated prompt
     cmd = f'echo Y| choco install {name} -y --no-progress --confirm'
@@ -641,7 +710,7 @@ def ensure_git(log: LogFn) -> bool:
     if which("git"):
         _log(log, "[OK] Git bereits vorhanden")
         return True
-    _log(log, "==> Installiere Git…")
+    _log(log, "==> Installiere Git...")
     if install_winget_package("Git.Git", log):
         refresh_path()
         if which("git"):
@@ -658,7 +727,7 @@ def ensure_python(log: LogFn) -> bool:
     if which("python") or which("py"):
         _log(log, "[OK] Python bereits vorhanden")
         return True
-    _log(log, "==> Installiere Python 3…")
+    _log(log, "==> Installiere Python 3...")
     if install_winget_package("Python.Python.3.12", log):
         refresh_path()
         if which("python") or which("py"):
@@ -680,7 +749,7 @@ def ensure_cmake(log: LogFn) -> bool:
         if pv and pv >= MIN_CMAKE:
             _log(log, f"[OK] CMake {ver.splitlines()[0]}")
             return True
-    _log(log, "==> Installiere CMake…")
+    _log(log, "==> Installiere CMake...")
     if install_winget_package("Kitware.CMake", log):
         refresh_path()
         if which("cmake") or (CMAKE_BIN / "cmake.exe").is_file():
@@ -697,7 +766,7 @@ def ensure_ninja(log: LogFn) -> bool:
     if which("ninja"):
         _log(log, "[OK] Ninja vorhanden")
         return True
-    _log(log, "==> Installiere Ninja…")
+    _log(log, "==> Installiere Ninja...")
     if install_winget_package("Ninja-build.Ninja", log):
         refresh_path()
         if which("ninja"):
@@ -719,14 +788,14 @@ def ensure_winlibs(log: LogFn) -> bool:
             _log(log, f"[OK] {line}")
             add_user_path(WINLIBS_ROOT / "mingw64" / "bin", log)
             return True
-    _log(log, f"==> Lade WinLibs {WINLIBS_RELEASE}…")
+    _log(log, f"==> Lade WinLibs {WINLIBS_RELEASE}...")
     _log(log, f"  URL: {WINLIBS_URL}")
     WINLIBS_ROOT.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.gettempdir()) / WINLIBS_ZIP
     try:
-        _log(log, f"  Download nach {tmp}…")
+        _log(log, f"  Download nach {tmp}...")
         urllib.request.urlretrieve(WINLIBS_URL, tmp)  # noqa: S310
-        _log(log, f"  Entpacke nach {WINLIBS_ROOT}…")
+        _log(log, f"  Entpacke nach {WINLIBS_ROOT}...")
         with zipfile.ZipFile(tmp, "r") as zf:
             zf.extractall(WINLIBS_ROOT)
     except Exception as e:
@@ -753,14 +822,14 @@ def ensure_repo(repo_root: Path, log: LogFn) -> bool:
             run(["git", "remote", "add", "origin", REPO_URL], cwd=repo_root, log=log)
         return True
     if not which("git"):
-        _log(log, "[ABBRUCH] Git fehlt — kann nicht clonen")
+        _log(log, "[ABBRUCH] Git fehlt - kann nicht clonen")
         return False
     parent = repo_root.parent
     parent.mkdir(parents=True, exist_ok=True)
     if any(repo_root.iterdir()) if repo_root.exists() else False:
         # non-empty without .git
         if (repo_root / "launcher").is_dir() and (repo_root / "CMakeLists.txt").is_file():
-            _log(log, "==> Initialisiere git in vorhandenem Ordner…")
+            _log(log, "==> Initialisiere git in vorhandenem Ordner...")
             run(["git", "init"], cwd=repo_root, log=log)
             run(["git", "remote", "add", "origin", REPO_URL], cwd=repo_root, log=log)
             run(["git", "fetch", "origin"], cwd=repo_root, log=log, timeout=300)
@@ -768,7 +837,7 @@ def ensure_repo(repo_root: Path, log: LogFn) -> bool:
             return (repo_root / ".git").exists()
         _log(log, f"[ABBRUCH] {repo_root} ist nicht leer und kein Git-Repo")
         return False
-    _log(log, f"==> Clone {REPO_URL} → {repo_root}")
+    _log(log, f"==> Clone {REPO_URL} -> {repo_root}")
     code, _ = run(["git", "clone", "--recursive", REPO_URL, str(repo_root)], log=log, timeout=600)
     return code == 0 and (repo_root / ".git").exists()
 
@@ -798,14 +867,14 @@ def ensure_flask(repo_root: Path, log: LogFn) -> bool:
     ]
     req = next((p for p in candidates if p.is_file()), None)
     if req is None:
-        _log(log, "[OK] No requirements.txt (frozen launcher?) — skip pip")
+        _log(log, "[OK] No requirements.txt (frozen launcher?) - skip pip")
         return True
     if getattr(sys, "frozen", False):
-        _log(log, "[OK] Frozen launcher — Python deps already bundled")
+        _log(log, "[OK] Frozen launcher - Python deps already bundled")
         return True
     py = which("python") or which("py")
     if not py:
-        _log(log, "[ABBRUCH] Python fehlt für pip")
+        _log(log, "[ABBRUCH] Python fehlt fuer pip")
         return False
     if which("python"):
         cmd = ["python", "-m", "pip", "install", "-r", str(req)]
@@ -816,7 +885,7 @@ def ensure_flask(repo_root: Path, log: LogFn) -> bool:
 
 
 def _run_step(step_id: str, fn: Callable[[], bool], log: LogFn) -> bool:
-    _set_step(step_id, "running", "In progress…")
+    _set_step(step_id, "running", "In progress...")
     _log(log, f"==> Step: {SETUP_STEP_LABELS.get(step_id, step_id)}")
     try:
         ok = bool(fn())
@@ -826,7 +895,7 @@ def _run_step(step_id: str, fn: Callable[[], bool], log: LogFn) -> bool:
     if ok:
         _set_step(step_id, "ok", "Done")
     else:
-        _set_step(step_id, "error", "Failed — see Console")
+        _set_step(step_id, "error", "Failed - see Console")
     return ok
 
 
@@ -868,7 +937,7 @@ def full_install(repo_root: Path, log: LogFn, steps: list[str] | None = None) ->
     _log(log, "########################################")
     if ok:
         _log(log, "# ERGEBNIS: Installation OK")
-        _log(log, "# Nächster Schritt: Launcher → Full Rebuild")
+        _log(log, "# Naechster Schritt: Launcher -> Full Rebuild")
     else:
         _log(log, "# ERGEBNIS: Installation mit FEHLERN abgebrochen")
         _log(log, "# Scroll nach oben zu [ABBRUCH]-Zeilen")

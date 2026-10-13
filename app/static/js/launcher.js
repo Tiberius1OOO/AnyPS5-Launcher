@@ -12,6 +12,7 @@
   let keyActions = [];
   let adminWhyCopy = null;
   let pendingInstallMode = null; // "admin" | "plain" | null
+  let lastSetupAudit = null;
 
   function toast(msg, kind = "") {
     const el = $("toast");
@@ -232,8 +233,8 @@
     } else {
       $("statBuild").innerHTML = `<span class="warn-text">not built</span>`;
     }
-    if ($("anyps5Root") && data.repoRoot) {
-      $("anyps5Root").value = data.repoRoot;
+    if ($("anyps5RootLabel") && data.repoRoot) {
+      $("anyps5RootLabel").textContent = data.repoRoot;
     }
 
     if ($("buildSyncLabel")) $("buildSyncLabel").textContent = b.syncLabel || "";
@@ -414,14 +415,14 @@
       if (toolIssues > 0) {
         badge.textContent = `${toolIssues} tool issue(s)`;
         badge.className = "badge danger";
-      } else if (nextSteps > 0 && !audit.allRequiredOk) {
-        badge.textContent = "Next: Install / repair";
-        badge.className = "badge warn";
       } else if (audit.allRequiredOk) {
-        badge.textContent = "Setup ready — Build next";
+        badge.textContent = "Ready — Build next";
         badge.className = "badge ok";
+      } else if (nextSteps > 0) {
+        badge.textContent = `${nextSteps} step(s) left`;
+        badge.className = "badge warn";
       } else {
-        badge.textContent = "Check list";
+        badge.textContent = "Checked";
         badge.className = "badge";
       }
     }
@@ -443,8 +444,11 @@
     if (label) label.textContent = `${done} / ${total}`;
     if (detail) {
       const cur = steps.find((s) => s.status === "running");
-      detail.textContent = progress.detail
-        || (cur ? `${cur.name}…` : (progress.ok === false ? "Failed — see Console" : progress.ok === true ? "Install finished" : "Waiting — start Install / repair"));
+      if (progress.running && cur) detail.textContent = `Installing: ${cur.name}…`;
+      else if (progress.detail) detail.textContent = progress.detail;
+      else if (progress.ok === false) detail.textContent = "Failed — see Console";
+      else if (progress.ok === true) detail.textContent = "Everything detected / install finished";
+      else detail.textContent = "Checking this PC…";
     }
     if (fill) {
       const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
@@ -455,7 +459,7 @@
       stepList.innerHTML = steps.length
         ? steps.map((s) => `
         <div class="setup-item">
-          <div class="st ${escapeHtml(s.status)}">${escapeHtml(s.status)}</div>
+          <div class="st ${escapeHtml(s.status)}">${escapeHtml(s.status === "todo" ? "next" : s.status)}</div>
           <div>
             <div class="name">${escapeHtml(s.name || s.id)}</div>
             <div class="detail">${escapeHtml(s.detail || "")}</div>
@@ -475,11 +479,14 @@
 
   function startProgressPoll() {
     stopProgressPoll();
+    let sawRunning = false;
     const tick = async () => {
       try {
         const data = await api("/api/setup/progress");
         renderSetupProgress(data.progress);
-        if (!data.progress || !data.progress.running) {
+        if (data.progress && data.progress.running) sawRunning = true;
+        // Only stop after we observed a run and it finished (avoid race on first tick)
+        if (sawRunning && data.progress && !data.progress.running) {
           stopProgressPoll();
           try { await runSetupAudit(true); } catch (_) {}
         }
@@ -518,57 +525,54 @@
           method: "POST",
           body: JSON.stringify({ elevate: true }),
         });
-        toast(data.message || "UAC started. Re-check afterwards.", "ok");
+        toast(data.message || "Admin installer started. Click Re-check when it finishes.", "ok");
+        // Poll audit so UI updates when elevated install finishes writing tools/repo
+        let n = 0;
+        const poll = setInterval(async () => {
+          n += 1;
+          try { await runSetupAudit(true); } catch (_) {}
+          if (n >= 40) clearInterval(poll);
+        }, 3000);
       } catch (e) {
         toast(e.message, "error");
       }
       return;
     }
     showTab("setup");
-    startProgressPoll();
     beginJob(
       "Starting setup / install...",
-      () => api("/api/setup/install", { method: "POST", body: JSON.stringify({}) }),
+      async () => {
+        await api("/api/setup/install", { method: "POST", body: JSON.stringify({}) });
+        startProgressPoll();
+      },
       { stayOnTab: true }
     );
+  }
+
+  function requestSetupInstall() {
+    // Tools already present → start install/clone immediately (no modal stall)
+    if (lastSetupAudit && lastSetupAudit.toolsOk) {
+      startSetupInstall({ elevate: false });
+      return;
+    }
+    openAdminWhyModal("plain");
   }
 
   async function runSetupAudit(quiet = false) {
     if (!quiet) toast("Checking installation...");
     const data = await api("/api/setup/audit");
+    lastSetupAudit = data.audit || null;
     renderSetupList(data.audit);
     if (data.adminWhy) adminWhyCopy = data.adminWhy;
     if (data.progress) renderSetupProgress(data.progress);
-    else {
-      try {
-        const p = await api("/api/setup/progress");
-        renderSetupProgress(p.progress);
-      } catch (_) {}
-    }
-    if (data.audit && data.audit.repoRoot && $("anyps5Root") && !$("anyps5Root").value) {
-      $("anyps5Root").value = data.audit.repoRoot;
-    }
+    const target = data.installTarget || (data.audit && data.audit.repoRoot) || "";
+    if (target && $("anyps5RootLabel")) $("anyps5RootLabel").textContent = target;
     if (!quiet) {
-      if (data.audit && data.audit.allRequiredOk) toast("Setup ready — you can Build next", "ok");
-      else if (data.audit && data.audit.toolsOk) toast("Tools OK. Run Install / repair to clone AnyPS5.", "ok");
-      else toast("Tool issues found. See Setup list.", "error");
+      if (data.audit && data.audit.allRequiredOk) toast("Everything detected — you can Build next", "ok");
+      else if (data.audit && data.audit.toolsOk) toast("Tools detected. Install will clone AnyPS5 if needed.", "ok");
+      else toast("Some tools missing. Install can fix them (admin may be needed).", "error");
     }
     return data;
-  }
-
-  async function saveAnyps5Root() {
-    const root = ($("anyps5Root")?.value || "").trim();
-    if (!root) {
-      toast("Please set an AnyPS5 folder path.", "error");
-      return;
-    }
-    await api("/api/config", {
-      method: "POST",
-      body: JSON.stringify({ anyps5Root: root }),
-    });
-    toast("AnyPS5 folder saved", "ok");
-    await refresh();
-    await runSetupAudit(true);
   }
 
   function initTipBubbles() {
@@ -725,28 +729,16 @@
     lastLineCount = 0;
   });
   on("btnSetupAudit", "click", () => runSetupAudit().catch((e) => toast(e.message, "error")));
-  on("btnSetupInstall", "click", () => openAdminWhyModal("plain"));
+  on("btnSetupInstall", "click", () => requestSetupInstall());
   on("btnSetupElevate", "click", () => openAdminWhyModal("admin"));
-  on("btnSaveAnyps5Root", "click", () => saveAnyps5Root().catch((e) => toast(e.message, "error")));
-  on("btnBrowseAnyps5Root", "click", async () => {
-    try {
-      const data = await api("/api/browse", {
-        method: "POST",
-        body: JSON.stringify({ kind: "folder" }),
-      });
-      if (data.path && $("anyps5Root")) {
-        $("anyps5Root").value = data.path;
-        await saveAnyps5Root();
-      }
-    } catch (e) {
-      toast(e.message, "error");
-    }
-  });
   on("btnAdminContinue", "click", () => startSetupInstall({ elevate: true }));
   on("btnAdminWithout", "click", () => startSetupInstall({ elevate: false }));
   on("btnAdminCancel", "click", () => closeAdminWhyModal());
   on("adminWhyModal", "click", (ev) => {
     if (ev.target === $("adminWhyModal")) closeAdminWhyModal();
+  });
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden) runSetupAudit(true).catch(() => {});
   });
   on("btnInputSave", "click", () => saveInput().catch((e) => toast(e.message, "error")));
   on("btnInputExportJson", "click", () => {

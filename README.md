@@ -12,11 +12,11 @@ This repository is **only the launcher**. It does not patch or fork AnyPS5 core.
 1. Download **AnyPS5-Launcher-windows.zip** from [Releases](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases) (or use a local build under `dist/release/`).
 2. Unzip anywhere (e.g. `Desktop\AnyPS5-Launcher`).
 3. Start **`AnyPS5Launcher.exe`** (or `Start-AnyPS5.cmd`).
-4. In the **Setup** tab, click **Install / repair everything**.
-   - A dialog explains why admin may be needed (Git / Python / CMake into Program Files, WinLibs under `C:\winlibs`).
-   - Choose **Continue with admin**, **Try without admin**, or **Cancel**.
-5. Wait until Setup is done (progress bar + steps; full log in **Console**).
-6. Open **Build** → **Full Rebuild**.
+4. Open **Setup**. Already-installed tools are detected as **ok** (no need to “Install” just to refresh that).
+5. Click **Install / repair everything** if clone/tools are still missing.
+   - AnyPS5 is cloned automatically into `<launcher-folder>\AnyPS5` (next to the exe). You do not pick a path.
+   - If system tools are missing, a dialog may ask for admin (Program Files / `C:\winlibs`). The launcher window itself stays non-admin — click **Re-check** after the UAC helper finishes.
+6. When Setup is ready, open **Build** → **Full Rebuild**.
 7. Open **Convert game**, pick your game folder, convert, then **Start game**.
 
 ---
@@ -33,9 +33,9 @@ This repository is **only the launcher**. It does not patch or fork AnyPS5 core.
 | **Readme** | Upstream AnyPS5 README |
 | **Console** | Live install / build / convert log |
 
-**AnyPS5 install folder** (footer + Setup field): defaults to an `AnyPS5` folder **inside the directory where you run the launcher** (next to the `.exe`). Change anytime under Setup → Browse / Save.
+**Where AnyPS5 goes:** Setup clones into `<folder-of-AnyPS5Launcher.exe>\AnyPS5` automatically. Example: if the exe is `D:\Tools\AnyPS5-Launcher\AnyPS5Launcher.exe`, source lands in `D:\Tools\AnyPS5-Launcher\AnyPS5\`.
 
-`next` rows in the checklist are expected first-run steps (clone / submodules / build), not broken tool installs. Use **Install / repair** for clone+tools; use **Build** only after the source is present.
+`ok` = already detected on this PC. `next` = still needed (usually clone/submodules). Use **Install / repair** only for what’s left; use **Build** after the source exists.
 
 ---
 
