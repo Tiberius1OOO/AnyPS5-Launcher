@@ -43,10 +43,10 @@ On Setup: **ok** = already present, **next** = still required.
 - Game folder needs `eboot.bin` or another `.elf`, plus modules such as `sce_module`.
 - Use the **?** tips on Convert options for GPU filter, Intel CPU, and cleanup level.
 
-## Path tip
+## Paths with spaces
 
-Put the launcher in a folder **without spaces** in the path (example: `C:\Games\AnyPS5-Launcher`).  
-Paths like `...\HYDERA LUNCHER\...` break MinGW `windres` during Build.
+Folder names with spaces (example: `C:\Games\HYDERA LUNCHER\...`) are supported.  
+During Build the launcher automatically uses a space-free Windows short path or a junction under `ProgramData`, because MinGW `windres` cannot parse spaced include paths. Your install folder does not need to move.
 
 ## Build from source
 

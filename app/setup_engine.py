@@ -738,14 +738,14 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                 )
             )
 
-    # Paths with spaces break MinGW windres during Build (include -I split on space)
+    # Paths with spaces are fine for users; Build remaps via short path / junction for windres
     if " " in str(repo_root):
         add(
             CheckItem(
                 "path_spaces",
-                "Install path (no spaces)",
-                "warn",
-                f"Path has spaces ({repo_root}). Move the launcher to e.g. C:\\Games\\AnyPS5-Launcher before Build, or Build will try Windows short paths.",
+                "Install path",
+                "ok",
+                "Contains spaces (supported). Build uses a space-free alias for MinGW windres.",
                 required=False,
             )
         )

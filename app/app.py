@@ -170,40 +170,124 @@ def windows_short_path(path: Path) -> Path | None:
         return None
 
 
-def space_safe_build_paths() -> tuple[Path, Path] | None:
+def _space_free_mount_root() -> Path:
+    """Anchor directory that should not contain spaces (for junctions)."""
+    for key in ("PROGRAMDATA", "SystemDrive"):
+        raw = str(os.environ.get(key) or "").strip()
+        if not raw:
+            continue
+        base = Path(raw)
+        if key == "SystemDrive":
+            base = Path(raw.rstrip("\\/") + "\\")
+        if not path_has_spaces(base):
+            return (base / "AnyPS5-Launcher" / "mounts").resolve()
+    return Path(r"C:\AnyPS5-Launcher\mounts")
+
+
+def _same_path(a: Path, b: Path) -> bool:
+    try:
+        return a.resolve().as_posix().lower() == b.resolve().as_posix().lower()
+    except Exception:
+        return str(a).lower() == str(b).lower()
+
+
+def ensure_space_free_alias(target: Path) -> Path | None:
+    """
+    Return a path without spaces that points at target.
+    Order: as-is → Windows short path → directory junction under ProgramData.
+    MinGW windres splits -I paths on spaces; building via a space-free alias fixes that
+    while the user's real folder may still contain spaces.
+    """
+    target = target.resolve()
+    if not path_has_spaces(target):
+        return target
+
+    short = windows_short_path(target)
+    if short is not None:
+        return short
+
+    if os.name != "nt":
+        return None
+
+    import hashlib
+
+    mounts = _space_free_mount_root()
+    try:
+        mounts.mkdir(parents=True, exist_ok=True)
+    except Exception:
+        return None
+
+    dig = hashlib.sha1(str(target).lower().encode("utf-8")).hexdigest()[:16]
+    link = mounts / dig
+    if path_has_spaces(link):
+        return None
+
+    # Reuse existing junction if it already points here
+    if link.exists():
+        try:
+            current = Path(os.readlink(link))
+            if _same_path(current, target):
+                return link
+        except OSError:
+            pass
+        # Stale / wrong link: remove junction only (not the target tree)
+        try:
+            link.rmdir()
+        except OSError:
+            try:
+                subprocess.run(
+                    ["cmd", "/c", "rmdir", str(link)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+            except Exception:
+                return None
+
+    # mklink /J does not need admin
+    proc = subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(link), str(target)],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    if proc.returncode != 0 or not link.exists():
+        return None
+    return link
+
+
+def space_safe_build_paths() -> tuple[Path, Path, str] | None:
     """
     Paths for cmake -S/-B that MinGW windres can digest.
-    windres breaks include paths that contain spaces (splits on the space).
-    Prefer Windows short paths when the real path has spaces.
+    Returns (source, build, how) where how describes the mapping used.
     """
     root = get_repo_root().resolve()
-    build = (root / "build").resolve()
-    if not path_has_spaces(root) and not path_has_spaces(build):
-        return root, build
-    short_root = windows_short_path(root)
-    if short_root is None:
-        return None
-    # Ensure build dir exists so short path can resolve
     try:
-        build.mkdir(parents=True, exist_ok=True)
+        (root / "build").mkdir(parents=True, exist_ok=True)
     except Exception:
         pass
-    short_build = windows_short_path(build)
-    if short_build is None:
-        # Fall back to short_root / "build" (same folder, short prefix)
-        short_build = short_root / "build"
-        if path_has_spaces(short_build):
-            return None
-    return short_root, short_build
+
+    if not path_has_spaces(root):
+        return root, root / "build", "direct"
+
+    alias = ensure_space_free_alias(root)
+    if alias is None:
+        return None
+    short = windows_short_path(root)
+    how = "short-path" if short is not None and _same_path(short, alias) else "junction"
+    build = alias / "build"
+    if path_has_spaces(build):
+        return None
+    return alias, build, how
 
 
 def path_spaces_error(path: Path | str) -> str:
     return (
-        "Install path contains spaces, which breaks the MinGW resource compiler (windres) "
-        "used while building AnyPS5. "
+        "Could not create a space-free build alias for MinGW windres. "
         f"Current path: {path}. "
-        "Move the whole AnyPS5-Launcher folder to a path without spaces "
-        "(example: C:\\Games\\AnyPS5-Launcher), run Setup again if needed, then Build."
+        "Try moving AnyPS5-Launcher to a simpler drive path, or re-run Build after "
+        "closing programs that lock the folder."
     )
 
 
@@ -861,13 +945,16 @@ def api_rebuild():
     paths = space_safe_build_paths()
     if paths is None:
         return jsonify({"ok": False, "error": path_spaces_error(get_repo_root())}), 400
-    src, build = paths
+    src, build, how = paths
     cores = str(os.cpu_count() or 4)
     preamble: list[str] = []
-    if path_has_spaces(get_repo_root()):
+    if how != "direct":
+        label = "Windows short path" if how == "short-path" else "space-free junction"
         preamble.append(
-            "Note: install path contains spaces. Using Windows short paths so MinGW windres works:"
+            f"Note: install path has spaces. Building via {label} so MinGW windres works "
+            "(your folder stays as-is):"
         )
+        preamble.append(f"  real: {get_repo_root()}")
         preamble.append(f"  -S {src}")
         preamble.append(f"  -B {build}")
 
