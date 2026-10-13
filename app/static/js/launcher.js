@@ -170,7 +170,7 @@
     } else if (b.syncState === "missing") {
       items.push({
         kind: "warn",
-        html: `<strong>Not built yet.</strong> Tools/source look ready — open Build and run Build now.
+        html: `<strong>Not built yet.</strong> Tools/source look ready. Open Build and run Build now.
           <div class="alert-actions">
             <button class="btn compact primary" type="button" data-alert="rebuild">Build now</button>
           </div>`,
@@ -416,7 +416,7 @@
         badge.textContent = `${toolIssues} tool issue(s)`;
         badge.className = "badge danger";
       } else if (audit.allRequiredOk) {
-        badge.textContent = "Ready — Build next";
+        badge.textContent = "Ready. Build next";
         badge.className = "badge ok";
       } else if (nextSteps > 0) {
         badge.textContent = `${nextSteps} step(s) left`;
@@ -453,7 +453,7 @@
       if (progress.running && transfer && transfer.label) detail.textContent = transfer.label;
       else if (progress.running && cur) detail.textContent = `Installing: ${cur.name}…`;
       else if (progress.detail) detail.textContent = progress.detail;
-      else if (progress.ok === false) detail.textContent = "Failed — see Console";
+      else if (progress.ok === false) detail.textContent = "Failed. See Console";
       else if (progress.ok === true) detail.textContent = "Everything detected / install finished";
       else detail.textContent = "Checking this PC…";
     }
@@ -596,7 +596,7 @@
     const target = data.installTarget || (data.audit && data.audit.repoRoot) || "";
     if (target && $("anyps5RootLabel")) $("anyps5RootLabel").textContent = target;
     if (!quiet) {
-      if (data.audit && data.audit.allRequiredOk) toast("Everything detected — you can Build next", "ok");
+      if (data.audit && data.audit.allRequiredOk) toast("Everything detected. You can Build next", "ok");
       else if (data.audit && data.audit.toolsOk) toast("Tools detected. Install will clone AnyPS5 if needed.", "ok");
       else toast("Some tools missing. Install can fix them (admin may be needed).", "error");
     }

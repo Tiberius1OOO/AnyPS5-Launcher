@@ -2,7 +2,7 @@
 
 Windows launcher for [AnyPS5](https://github.com/boykopovar/AnyPS5).
 
-Installs the tools you need, clones AnyPS5 next to the app, builds it, converts a game folder to a Windows `.exe`, and starts it — from a browser UI.
+Installs the tools you need, clones AnyPS5 next to the app, builds it, converts a game folder to a Windows `.exe`, and starts it from a browser UI.
 
 This repository is the launcher only. It does not modify upstream AnyPS5.
 
@@ -62,5 +62,5 @@ Output: `dist\release\AnyPS5-Launcher\` and `AnyPS5-Launcher-windows.zip`.
 
 ## License
 
-MIT — see [LICENSE](LICENSE).  
+MIT. See [LICENSE](LICENSE).  
 AnyPS5 remains under its own license: [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5).

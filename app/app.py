@@ -997,7 +997,7 @@ def api_setup_install():
                     "ok": True,
                     "elevated": True,
                     "message": (
-                        "UAC opened an admin installer window. This launcher stays non-admin — "
+                        "UAC opened an admin installer window. This launcher stays non-admin. "
                         "when the other window finishes, click Re-check."
                     ),
                 }
