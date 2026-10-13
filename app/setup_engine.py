@@ -47,6 +47,7 @@ _progress: dict = {
     "total": 0,
     "ok": None,
     "detail": "",
+    "transfer": None,  # {percent, speed, received, total, phase, label}
 }
 
 
@@ -59,6 +60,7 @@ def reset_progress(steps: list[str] | None = None) -> None:
         _progress["total"] = len(todo)
         _progress["ok"] = None
         _progress["detail"] = ""
+        _progress["transfer"] = None
         _progress["steps"] = [
             {
                 "id": sid,
@@ -74,6 +76,8 @@ def _set_step(step_id: str, status: str, detail: str = "") -> None:
     with _progress_lock:
         _progress["current"] = step_id if status == "running" else _progress.get("current", "")
         _progress["detail"] = detail
+        if status != "running":
+            _progress["transfer"] = None
         for row in _progress["steps"]:
             if row["id"] == step_id:
                 row["status"] = status
@@ -85,11 +89,53 @@ def _set_step(step_id: str, status: str, detail: str = "") -> None:
         )
 
 
+def set_transfer(
+    *,
+    percent: float | None = None,
+    speed: str = "",
+    received: str = "",
+    total: str = "",
+    phase: str = "",
+    label: str = "",
+    step_id: str | None = None,
+) -> None:
+    """Update live download/clone transfer stats for the UI."""
+    detail_parts = []
+    if phase:
+        detail_parts.append(phase)
+    if percent is not None:
+        detail_parts.append(f"{percent:.0f}%")
+    if received and total:
+        detail_parts.append(f"{received} / {total}")
+    elif received:
+        detail_parts.append(received)
+    if speed:
+        detail_parts.append(speed)
+    detail = " · ".join(detail_parts) if detail_parts else (label or "Working…")
+    with _progress_lock:
+        _progress["transfer"] = {
+            "percent": percent,
+            "speed": speed,
+            "received": received,
+            "total": total,
+            "phase": phase,
+            "label": label or detail,
+        }
+        _progress["detail"] = detail
+        sid = step_id or _progress.get("current") or ""
+        if sid:
+            for row in _progress["steps"]:
+                if row["id"] == sid:
+                    row["detail"] = detail
+                    break
+
+
 def finish_progress(ok: bool) -> None:
     with _progress_lock:
         _progress["running"] = False
         _progress["ok"] = ok
         _progress["current"] = ""
+        _progress["transfer"] = None
         if ok:
             _progress["detail"] = "Setup finished"
         else:
@@ -152,6 +198,7 @@ def sync_progress_from_audit(report: "AuditReport") -> dict:
         _progress["total"] = total
         _progress["ok"] = ok
         _progress["detail"] = detail
+        _progress["transfer"] = None
         _progress["steps"] = steps
         return {
             "running": False,
@@ -160,6 +207,7 @@ def sync_progress_from_audit(report: "AuditReport") -> dict:
             "total": total,
             "ok": ok,
             "detail": detail,
+            "transfer": None,
             "steps": [dict(s) for s in steps],
         }
 
@@ -181,10 +229,12 @@ def get_progress() -> dict:
             total = len(steps)
             done = 0
             detail = "Checking this PC..."
+            transfer = None
         else:
             total = _progress["total"]
             done = _progress["done"]
             detail = _progress["detail"] or ""
+            transfer = dict(_progress["transfer"]) if _progress.get("transfer") else None
         return {
             "running": _progress["running"],
             "current": _progress["current"],
@@ -192,6 +242,7 @@ def get_progress() -> dict:
             "total": total,
             "ok": _progress["ok"],
             "detail": detail,
+            "transfer": transfer,
             "steps": steps,
         }
 
@@ -297,6 +348,172 @@ def run(
     except Exception as e:
         _log(log, f"  [ABBRUCH] {e}")
         return 1, str(e)
+
+
+def _parse_git_progress_line(line: str) -> dict | None:
+    """Parse git --progress stderr into transfer fields."""
+    import re
+
+    s = (line or "").strip().rstrip("\r")
+    if not s:
+        return None
+    # Receiving objects:  45% (1234/2742), 12.34 MiB | 2.10 MiB/s
+    m = re.search(
+        r"(Receiving objects|Resolving deltas|Remote:\s*Compressing objects|"
+        r"Updating files|Checking out files|Filtering content)\s*:\s*(\d+)%"
+        r"(?:\s*\(([^)]+)\))?(?:,\s*([^|]+))?(?:\|\s*(.+))?",
+        s,
+        re.IGNORECASE,
+    )
+    if m:
+        phase, pct, counts, size, speed = m.groups()
+        received = ""
+        total = ""
+        if counts and "/" in counts:
+            received, total = [x.strip() for x in counts.split("/", 1)]
+        size = (size or "").strip().rstrip(",")
+        return {
+            "percent": float(pct),
+            "phase": phase.replace("Remote:", "").strip(),
+            "received": size or received,
+            "total": total,
+            "speed": (speed or "").strip(),
+        }
+    if "Cloning into" in s or "Submodule" in s:
+        return {"percent": None, "phase": s[:120], "received": "", "total": "", "speed": ""}
+    return None
+
+
+def run_streaming(
+    args: list[str],
+    log: LogFn | None = None,
+    cwd: str | Path | None = None,
+    timeout: int | None = None,
+    env: dict | None = None,
+    on_line: Callable[[str], None] | None = None,
+    step_id: str | None = None,
+) -> tuple[int, str]:
+    """Run a process and stream output. Handles git \\r progress updates."""
+    _log(log, "> " + " ".join(args))
+    merged: list[str] = []
+    last_logged = ""
+    try:
+        run_env = dict(env or os.environ.copy())
+        # Help git emit progress more promptly on Windows pipes
+        run_env.setdefault("GIT_FLUSH", "1")
+        p = subprocess.Popen(
+            args,
+            cwd=str(cwd) if cwd else None,
+            env=run_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=0,
+        )
+        assert p.stdout is not None
+        deadline = (datetime.now().timestamp() + timeout) if timeout else None
+        buf = ""
+
+        def emit(line: str) -> None:
+            nonlocal last_logged
+            line = line.strip()
+            if not line:
+                return
+            merged.append(line)
+            # Avoid flooding console with identical \\r progress spam
+            if line != last_logged:
+                _log(log, "  " + line)
+                last_logged = line
+            if on_line:
+                on_line(line)
+            parsed = _parse_git_progress_line(line)
+            if parsed and step_id:
+                set_transfer(step_id=step_id, **parsed)
+
+        while True:
+            if deadline and datetime.now().timestamp() > deadline:
+                p.kill()
+                _log(log, "  [ABBRUCH] Timeout")
+                return 1, "timeout"
+            ch = p.stdout.read(1)
+            if ch == "":
+                if buf:
+                    emit(buf)
+                    buf = ""
+                break
+            if ch in ("\r", "\n"):
+                emit(buf)
+                buf = ""
+            else:
+                buf += ch
+        code = p.wait(timeout=30)
+        if code != 0:
+            _log(log, f"  [ABBRUCH] Exit-Code {code}")
+        return code, "\n".join(merged[-80:])
+    except Exception as e:
+        _log(log, f"  [ABBRUCH] {e}")
+        return 1, str(e)
+
+
+def _fmt_bytes(n: float) -> str:
+    units = ["B", "KB", "MB", "GB"]
+    v = float(n)
+    for u in units:
+        if v < 1024 or u == units[-1]:
+            return f"{v:.1f} {u}" if u != "B" else f"{int(v)} B"
+        v /= 1024
+    return f"{n:.0f} B"
+
+
+def download_with_progress(url: str, dest: Path, log: LogFn, step_id: str) -> bool:
+    """HTTP download with live percent + speed in Setup progress."""
+    import time
+
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    _log(log, f"  Download {url}")
+    start = time.time()
+    last_t = start
+    last_b = 0
+
+    def hook(block_num: int, block_size: int, total_size: int) -> None:
+        nonlocal last_t, last_b
+        got = block_num * block_size
+        if total_size > 0:
+            got = min(got, total_size)
+        now = time.time()
+        dt = max(now - last_t, 1e-3)
+        speed = (got - last_b) / dt if got >= last_b else 0
+        if now - last_t >= 0.25 or (total_size > 0 and got >= total_size):
+            last_t = now
+            last_b = got
+            pct = (100.0 * got / total_size) if total_size > 0 else None
+            set_transfer(
+                step_id=step_id,
+                percent=pct,
+                phase="Downloading",
+                received=_fmt_bytes(got),
+                total=_fmt_bytes(total_size) if total_size > 0 else "",
+                speed=f"{_fmt_bytes(speed)}/s",
+            )
+
+    try:
+        urllib.request.urlretrieve(url, dest, reporthook=hook)  # noqa: S310
+        elapsed = max(time.time() - start, 1e-3)
+        size = dest.stat().st_size if dest.is_file() else 0
+        set_transfer(
+            step_id=step_id,
+            percent=100,
+            phase="Download complete",
+            received=_fmt_bytes(size),
+            total=_fmt_bytes(size),
+            speed=f"avg {_fmt_bytes(size / elapsed)}/s",
+        )
+        return True
+    except Exception as e:
+        _log(log, f"[ABBRUCH] Download failed: {e}")
+        return False
 
 
 def refresh_path() -> None:
@@ -794,7 +1011,9 @@ def ensure_winlibs(log: LogFn) -> bool:
     tmp = Path(tempfile.gettempdir()) / WINLIBS_ZIP
     try:
         _log(log, f"  Download nach {tmp}...")
-        urllib.request.urlretrieve(WINLIBS_URL, tmp)  # noqa: S310
+        if not download_with_progress(WINLIBS_URL, tmp, log, "winlibs"):
+            return False
+        set_transfer(step_id="winlibs", phase="Extracting WinLibs", percent=None)
         _log(log, f"  Entpacke nach {WINLIBS_ROOT}...")
         with zipfile.ZipFile(tmp, "r") as zf:
             zf.extractall(WINLIBS_ROOT)
@@ -826,19 +1045,39 @@ def ensure_repo(repo_root: Path, log: LogFn) -> bool:
         return False
     parent = repo_root.parent
     parent.mkdir(parents=True, exist_ok=True)
+    env = tool_env()
+    # Shallow-ish feedback: clone WITHOUT --recursive so this step finishes visibly;
+    # submodules are a separate step with their own live progress.
     if any(repo_root.iterdir()) if repo_root.exists() else False:
         # non-empty without .git
         if (repo_root / "launcher").is_dir() and (repo_root / "CMakeLists.txt").is_file():
             _log(log, "==> Initialisiere git in vorhandenem Ordner...")
             run(["git", "init"], cwd=repo_root, log=log)
             run(["git", "remote", "add", "origin", REPO_URL], cwd=repo_root, log=log)
-            run(["git", "fetch", "origin"], cwd=repo_root, log=log, timeout=300)
+            set_transfer(step_id="repo", phase="Fetching origin", percent=0)
+            code, _ = run_streaming(
+                ["git", "fetch", "--progress", "origin"],
+                cwd=repo_root,
+                log=log,
+                timeout=600,
+                env=env,
+                step_id="repo",
+            )
+            if code != 0:
+                return False
             run(["git", "checkout", "-B", "main", "origin/main"], cwd=repo_root, log=log)
             return (repo_root / ".git").exists()
         _log(log, f"[ABBRUCH] {repo_root} ist nicht leer und kein Git-Repo")
         return False
     _log(log, f"==> Clone {REPO_URL} -> {repo_root}")
-    code, _ = run(["git", "clone", "--recursive", REPO_URL, str(repo_root)], log=log, timeout=600)
+    set_transfer(step_id="repo", phase="Cloning AnyPS5", percent=0)
+    code, _ = run_streaming(
+        ["git", "clone", "--progress", REPO_URL, str(repo_root)],
+        log=log,
+        timeout=900,
+        env=env,
+        step_id="repo",
+    )
     return code == 0 and (repo_root / ".git").exists()
 
 
@@ -848,12 +1087,14 @@ def ensure_submodules(repo_root: Path, log: LogFn) -> bool:
         return False
     _log(log, "==> git submodule update --init --recursive")
     env = tool_env()
-    code, _ = run(
-        ["git", "submodule", "update", "--init", "--recursive"],
+    set_transfer(step_id="submodules", phase="Updating submodules", percent=0)
+    code, _ = run_streaming(
+        ["git", "submodule", "update", "--init", "--recursive", "--progress"],
         cwd=repo_root,
         log=log,
-        timeout=600,
+        timeout=1800,
         env=env,
+        step_id="submodules",
     )
     return code == 0
 

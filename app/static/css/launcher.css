@@ -246,7 +246,11 @@ main {
   display: flex;
   flex-direction: column;
   flex: 1 1 auto;
-  overflow: hidden;
+  overflow: auto;
+}
+#tab-setup.panel.active {
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 .panel-head { flex: 0 0 auto; }
 .panel-head h2 {
@@ -643,7 +647,19 @@ select option { background: #0d1219; }
   height: 100%;
   width: 0%;
   background: linear-gradient(90deg, #3b82f6, #22c55e);
-  transition: width 0.25s ease;
+  transition: width 0.2s ease;
+}
+.setup-progress-bar.transfer .setup-progress-fill {
+  background: linear-gradient(90deg, #22d3ee, #3b82f6);
+}
+.setup-transfer {
+  margin-top: 0.65rem;
+  padding-top: 0.55rem;
+  border-top: 1px solid var(--line);
+}
+.setup-transfer .setup-progress-detail {
+  word-break: break-word;
+  overflow-wrap: anywhere;
 }
 
 .setup-target {
@@ -651,21 +667,23 @@ select option { background: #0d1219; }
   color: var(--muted);
   font-size: 0.9rem;
   line-height: 1.4;
+  overflow-wrap: anywhere;
 }
 .setup-target code {
   color: var(--ink);
   font-family: var(--font-mono);
-  font-size: 0.85rem;
+  font-size: clamp(0.72rem, 1.6vw, 0.85rem);
   word-break: break-all;
+  overflow-wrap: anywhere;
 }
 .setup-columns {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
   gap: 0.85rem;
   margin-top: 0.5rem;
   align-items: start;
 }
-.setup-col { min-width: 0; }
+.setup-col { min-width: 0; max-width: 100%; }
 .setup-col .subhead { margin-top: 0; }
 @media (max-width: 960px) {
   .setup-columns { grid-template-columns: 1fr; }
@@ -675,12 +693,13 @@ select option { background: #0d1219; }
   border: 1px solid var(--line);
   background: rgba(0, 0, 0, 0.28);
   overflow: visible;
+  max-width: 100%;
 }
 .setup-item {
   display: grid;
-  grid-template-columns: 110px 1fr;
-  gap: 0.75rem;
-  padding: 0.75rem 0.9rem;
+  grid-template-columns: minmax(3.5rem, 5.5rem) minmax(0, 1fr);
+  gap: 0.55rem 0.75rem;
+  padding: 0.65rem 0.75rem;
   border-bottom: 1px solid var(--line);
   align-items: start;
 }
@@ -715,9 +734,30 @@ select option { background: #0d1219; }
 .setup-progress-detail {
   margin: 0 0 0.45rem;
   font-size: 0.88rem;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
-.setup-item .name { font-weight: 600; margin-bottom: 0.2rem; }
-.setup-item .detail { color: var(--muted); font-size: 0.88rem; font-family: var(--font-mono); word-break: break-word; }
+.setup-item .name {
+  font-weight: 600;
+  margin-bottom: 0.2rem;
+  overflow-wrap: anywhere;
+}
+.setup-item .detail {
+  color: var(--muted);
+  font-size: clamp(0.75rem, 1.5vw, 0.88rem);
+  font-family: var(--font-mono);
+  word-break: break-word;
+  overflow-wrap: anywhere;
+  line-height: 1.35;
+  max-width: 100%;
+}
+.foot .mono,
+#repoPath {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  max-width: 55%;
+  text-align: right;
+}
 .st-inline.ok {
   display: inline-block;
   font-family: var(--font-mono);

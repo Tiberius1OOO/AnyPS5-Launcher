@@ -434,17 +434,24 @@
     const label = $("setupProgressLabel");
     const detail = $("setupProgressDetail");
     const fill = $("setupProgressFill");
+    const tWrap = $("setupTransferWrap");
+    const tPhase = $("setupTransferPhase");
+    const tPct = $("setupTransferPct");
+    const tDetail = $("setupTransferDetail");
+    const tFill = $("setupTransferFill");
     if (!wrap || !progress) return;
 
     const steps = progress.steps || [];
     const total = progress.total || steps.length || 0;
     const done = progress.done || 0;
+    const transfer = progress.transfer || null;
 
     wrap.hidden = false;
     if (label) label.textContent = `${done} / ${total}`;
     if (detail) {
       const cur = steps.find((s) => s.status === "running");
-      if (progress.running && cur) detail.textContent = `Installing: ${cur.name}…`;
+      if (progress.running && transfer && transfer.label) detail.textContent = transfer.label;
+      else if (progress.running && cur) detail.textContent = `Installing: ${cur.name}…`;
       else if (progress.detail) detail.textContent = progress.detail;
       else if (progress.ok === false) detail.textContent = "Failed — see Console";
       else if (progress.ok === true) detail.textContent = "Everything detected / install finished";
@@ -454,6 +461,27 @@
       const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
       fill.style.width = `${pct}%`;
     }
+
+    if (tWrap) {
+      if (progress.running && transfer) {
+        tWrap.hidden = false;
+        const pct = transfer.percent != null ? Math.max(0, Math.min(100, Number(transfer.percent))) : null;
+        if (tPhase) tPhase.textContent = transfer.phase || "Transfer";
+        if (tPct) tPct.textContent = pct != null ? `${Math.round(pct)}%` : "…";
+        if (tDetail) {
+          const bits = [];
+          if (transfer.received && transfer.total) bits.push(`${transfer.received} / ${transfer.total}`);
+          else if (transfer.received) bits.push(transfer.received);
+          if (transfer.speed) bits.push(transfer.speed);
+          tDetail.textContent = bits.join(" · ") || (transfer.label || "");
+        }
+        if (tFill) tFill.style.width = pct != null ? `${pct}%` : "15%";
+      } else {
+        tWrap.hidden = true;
+        if (tFill) tFill.style.width = "0%";
+      }
+    }
+
     if (stepList) {
       stepList.hidden = false;
       stepList.innerHTML = steps.length
@@ -495,7 +523,7 @@
       }
     };
     tick();
-    progressTimer = setInterval(tick, 400);
+    progressTimer = setInterval(tick, 250);
   }
 
   function openAdminWhyModal(mode) {

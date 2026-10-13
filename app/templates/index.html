@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/launcher.css?v=18" />
+  <link rel="stylesheet" href="/static/css/launcher.css?v=19" />
 </head>
 <body class="boot-pending">
   <div class="bg" aria-hidden="true"></div>
@@ -94,8 +94,18 @@
             <span id="setupProgressLabel">0 / 0</span>
           </div>
           <div class="setup-progress-detail muted" id="setupProgressDetail">Checking this PC…</div>
-          <div class="setup-progress-bar" aria-hidden="true">
+          <div class="setup-progress-bar" aria-hidden="true" title="Overall steps">
             <div class="setup-progress-fill" id="setupProgressFill"></div>
+          </div>
+          <div class="setup-transfer" id="setupTransferWrap" hidden>
+            <div class="setup-progress-meta">
+              <span id="setupTransferPhase">Download</span>
+              <span id="setupTransferPct" class="mono">0%</span>
+            </div>
+            <div class="setup-progress-detail" id="setupTransferDetail"></div>
+            <div class="setup-progress-bar transfer" aria-hidden="true">
+              <div class="setup-progress-fill" id="setupTransferFill"></div>
+            </div>
           </div>
         </div>
         <div class="setup-columns">
@@ -316,6 +326,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
-  <script src="/static/js/launcher.js?v=18"></script>
+  <script src="/static/js/launcher.js?v=19"></script>
 </body>
 </html>
