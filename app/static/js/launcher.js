@@ -117,6 +117,7 @@
 
   function fillConfig(cfg) {
     if (!cfg) return;
+    if (cfg.anyps5Root != null && $("anyps5Root")) $("anyps5Root").value = cfg.anyps5Root || "";
     if (cfg.lastGameRoot) $("gameRoot").value = cfg.lastGameRoot;
     if (cfg.lastOutputDir) $("outputDir").value = cfg.lastOutputDir;
     if (cfg.outputName) $("outputName").value = cfg.outputName;
@@ -157,10 +158,18 @@
             <button class="btn compact" type="button" data-alert="mark">Mark as up to date</button>
           </div>`,
       });
+    } else if (b.syncState === "need_setup") {
+      items.push({
+        kind: "warn",
+        html: `<strong>AnyPS5 source not ready yet.</strong> Open Setup and run Install / repair (this clones the project). Build comes after that.
+          <div class="alert-actions">
+            <button class="btn compact primary" type="button" data-alert="setup">Open Setup</button>
+          </div>`,
+      });
     } else if (b.syncState === "missing") {
       items.push({
         kind: "warn",
-        html: `<strong>Not built yet.</strong> Open Build and run Build now.
+        html: `<strong>Not built yet.</strong> Tools/source look ready — open Build and run Build now.
           <div class="alert-actions">
             <button class="btn compact primary" type="button" data-alert="rebuild">Build now</button>
           </div>`,
@@ -185,6 +194,7 @@
         if (a === "pull") { showTab("updates"); $("btnPull")?.click(); }
         if (a === "rebuild") { showTab("build"); $("btnRebuild")?.click(); }
         if (a === "mark") $("btnMarkBuild")?.click();
+        if (a === "setup") showTab("setup");
       });
     });
   }
@@ -217,8 +227,13 @@
       $("statBuild").innerHTML = `<span class="danger-text">outdated</span>`;
     } else if (b.ready) {
       $("statBuild").innerHTML = `<span class="warn-text">check needed</span>`;
+    } else if (b.syncState === "need_setup") {
+      $("statBuild").innerHTML = `<span class="warn-text">need setup</span>`;
     } else {
       $("statBuild").innerHTML = `<span class="warn-text">not built</span>`;
+    }
+    if ($("anyps5Root") && data.repoRoot) {
+      $("anyps5Root").value = data.repoRoot;
     }
 
     if ($("buildSyncLabel")) $("buildSyncLabel").textContent = b.syncLabel || "";
@@ -386,7 +401,7 @@
     }
     box.innerHTML = checks.map((c) => `
       <div class="setup-item">
-        <div class="st ${escapeHtml(c.status)}">${escapeHtml(c.status)}</div>
+        <div class="st ${escapeHtml(c.status)}">${escapeHtml(c.status === "todo" ? "next" : c.status)}</div>
         <div>
           <div class="name">${escapeHtml(c.name)}${c.required ? "" : " (optional)"}</div>
           <div class="detail">${escapeHtml(c.detail || "")}</div>
@@ -394,12 +409,20 @@
       </div>
     `).join("");
     if (badge) {
-      if (audit.allRequiredOk) {
-        badge.textContent = "All required OK";
+      const toolIssues = (audit.missingRequired || []).length;
+      const nextSteps = (audit.nextSteps || []).length;
+      if (toolIssues > 0) {
+        badge.textContent = `${toolIssues} tool issue(s)`;
+        badge.className = "badge danger";
+      } else if (nextSteps > 0 && !audit.allRequiredOk) {
+        badge.textContent = "Next: Install / repair";
+        badge.className = "badge warn";
+      } else if (audit.allRequiredOk) {
+        badge.textContent = "Setup ready — Build next";
         badge.className = "badge ok";
       } else {
-        badge.textContent = `${(audit.missingRequired || []).length} issue(s)`;
-        badge.className = "badge danger";
+        badge.textContent = "Check list";
+        badge.className = "badge";
       }
     }
   }
@@ -415,20 +438,13 @@
     const steps = progress.steps || [];
     const total = progress.total || steps.length || 0;
     const done = progress.done || 0;
-    const active = progress.running || (steps.some((s) => s.status === "running"));
-
-    if (!steps.length && !active && progress.ok == null) {
-      wrap.hidden = true;
-      if (stepList) stepList.hidden = true;
-      return;
-    }
 
     wrap.hidden = false;
     if (label) label.textContent = `${done} / ${total}`;
     if (detail) {
       const cur = steps.find((s) => s.status === "running");
       detail.textContent = progress.detail
-        || (cur ? `${cur.name}…` : (progress.ok === false ? "Failed" : progress.ok === true ? "Done" : ""));
+        || (cur ? `${cur.name}…` : (progress.ok === false ? "Failed — see Console" : progress.ok === true ? "Install finished" : "Waiting — start Install / repair"));
     }
     if (fill) {
       const pct = total > 0 ? Math.min(100, Math.round((done / total) * 100)) : 0;
@@ -436,7 +452,8 @@
     }
     if (stepList) {
       stepList.hidden = false;
-      stepList.innerHTML = steps.map((s) => `
+      stepList.innerHTML = steps.length
+        ? steps.map((s) => `
         <div class="setup-item">
           <div class="st ${escapeHtml(s.status)}">${escapeHtml(s.status)}</div>
           <div>
@@ -444,7 +461,8 @@
             <div class="detail">${escapeHtml(s.detail || "")}</div>
           </div>
         </div>
-      `).join("");
+      `).join("")
+        : `<p class="empty">No steps yet.</p>`;
     }
   }
 
@@ -521,11 +539,36 @@
     renderSetupList(data.audit);
     if (data.adminWhy) adminWhyCopy = data.adminWhy;
     if (data.progress) renderSetupProgress(data.progress);
+    else {
+      try {
+        const p = await api("/api/setup/progress");
+        renderSetupProgress(p.progress);
+      } catch (_) {}
+    }
+    if (data.audit && data.audit.repoRoot && $("anyps5Root") && !$("anyps5Root").value) {
+      $("anyps5Root").value = data.audit.repoRoot;
+    }
     if (!quiet) {
-      if (data.audit && data.audit.allRequiredOk) toast("All required dependencies OK", "ok");
-      else toast("Missing dependencies. See Setup list.", "error");
+      if (data.audit && data.audit.allRequiredOk) toast("Setup ready — you can Build next", "ok");
+      else if (data.audit && data.audit.toolsOk) toast("Tools OK. Run Install / repair to clone AnyPS5.", "ok");
+      else toast("Tool issues found. See Setup list.", "error");
     }
     return data;
+  }
+
+  async function saveAnyps5Root() {
+    const root = ($("anyps5Root")?.value || "").trim();
+    if (!root) {
+      toast("Please set an AnyPS5 folder path.", "error");
+      return;
+    }
+    await api("/api/config", {
+      method: "POST",
+      body: JSON.stringify({ anyps5Root: root }),
+    });
+    toast("AnyPS5 folder saved", "ok");
+    await refresh();
+    await runSetupAudit(true);
   }
 
   function initTipBubbles() {
@@ -684,6 +727,21 @@
   on("btnSetupAudit", "click", () => runSetupAudit().catch((e) => toast(e.message, "error")));
   on("btnSetupInstall", "click", () => openAdminWhyModal("plain"));
   on("btnSetupElevate", "click", () => openAdminWhyModal("admin"));
+  on("btnSaveAnyps5Root", "click", () => saveAnyps5Root().catch((e) => toast(e.message, "error")));
+  on("btnBrowseAnyps5Root", "click", async () => {
+    try {
+      const data = await api("/api/browse", {
+        method: "POST",
+        body: JSON.stringify({ kind: "folder" }),
+      });
+      if (data.path && $("anyps5Root")) {
+        $("anyps5Root").value = data.path;
+        await saveAnyps5Root();
+      }
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  });
   on("btnAdminContinue", "click", () => startSetupInstall({ elevate: true }));
   on("btnAdminWithout", "click", () => startSetupInstall({ elevate: false }));
   on("btnAdminCancel", "click", () => closeAdminWhyModal());
@@ -848,6 +906,7 @@
 
   // boot
   initTipBubbles();
+  api("/api/setup/progress").then((d) => renderSetupProgress(d.progress)).catch(() => {});
   runBootIntro()
     .then(() => refresh())
     .then(async () => {

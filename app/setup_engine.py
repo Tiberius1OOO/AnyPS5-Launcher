@@ -96,16 +96,37 @@ def finish_progress(ok: bool) -> None:
             _progress["detail"] = "Setup aborted — see Console for [ABBRUCH] lines"
 
 
+def planned_progress_steps() -> list[dict]:
+    return [
+        {
+            "id": sid,
+            "name": SETUP_STEP_LABELS.get(sid, sid),
+            "status": "pending",
+            "detail": "Waiting — start Install / repair",
+        }
+        for sid in SETUP_STEP_ORDER
+    ]
+
+
 def get_progress() -> dict:
     with _progress_lock:
+        steps = [dict(s) for s in _progress["steps"]]
+        if not steps:
+            steps = planned_progress_steps()
+            total = len(steps)
+            done = 0
+        else:
+            total = _progress["total"]
+            done = _progress["done"]
         return {
             "running": _progress["running"],
             "current": _progress["current"],
-            "done": _progress["done"],
-            "total": _progress["total"],
+            "done": done,
+            "total": total,
             "ok": _progress["ok"],
-            "detail": _progress["detail"],
-            "steps": [dict(s) for s in _progress["steps"]],
+            "detail": _progress["detail"]
+            or ("Install not started yet" if not _progress["running"] and _progress["ok"] is None else ""),
+            "steps": steps,
         }
 
 
@@ -127,7 +148,7 @@ SSL_CERT = Path(r"C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt")
 class CheckItem:
     id: str
     name: str
-    status: str  # ok | missing | warn | error
+    status: str  # ok | missing | warn | error | todo
     detail: str = ""
     required: bool = True
     fixable: bool = True
@@ -140,6 +161,8 @@ class AuditReport:
     repoRoot: str = ""
     allRequiredOk: bool = False
     missingRequired: list[str] = field(default_factory=list)
+    nextSteps: list[str] = field(default_factory=list)
+    toolsOk: bool = False
     timestamp: str = ""
 
     def to_dict(self) -> dict:
@@ -149,6 +172,8 @@ class AuditReport:
             "repoRoot": self.repoRoot,
             "allRequiredOk": self.allRequiredOk,
             "missingRequired": self.missingRequired,
+            "nextSteps": self.nextSteps,
+            "toolsOk": self.toolsOk,
             "timestamp": self.timestamp,
         }
 
@@ -289,7 +314,13 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
 
     def add(item: CheckItem) -> None:
         checks.append(item)
-        mark = {"ok": "OK", "missing": "FEHLT", "warn": "WARN", "error": "FEHLER"}.get(item.status, "?")
+        mark = {
+            "ok": "OK",
+            "missing": "MISSING",
+            "warn": "WARN",
+            "error": "ERROR",
+            "todo": "NEXT",
+        }.get(item.status, "?")
         _log(log, f"  [{mark}] {item.name}: {item.detail or item.status}")
 
     # Admin
@@ -297,9 +328,9 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
     add(
         CheckItem(
             "admin",
-            "Administrator-Rechte",
+            "Administrator rights",
             "ok" if admin else "warn",
-            "Ja" if admin else "Nein (manche Installer brauchen UAC)",
+            "Yes" if admin else "No (some installers need UAC)",
             required=False,
             fixable=True,
         )
@@ -312,7 +343,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             "winget",
             "winget",
             "ok" if winget else "warn",
-            winget or "Nicht gefunden — Fallback Chocolatey/manuell",
+            winget or "Not found — Chocolatey/manual fallback",
             required=False,
         )
     )
@@ -335,19 +366,18 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
         code, ver = run(["git", "--version"], log=None)
         add(CheckItem("git", "Git", "ok", ver or git, required=True))
     else:
-        add(CheckItem("git", "Git", "missing", "Nicht installiert (nötig für GitHub-Clone)", required=True))
+        add(CheckItem("git", "Git", "missing", "Not installed (needed to clone AnyPS5)", required=True))
 
     # Python
     py = which("python") or which("py")
     if py:
-        code, ver = run([py if which("python") else "py", "--version"] if which("python") else ["py", "-3", "--version"], log=None)
         if which("python"):
             code, ver = run(["python", "--version"], log=None)
         else:
             code, ver = run(["py", "-3", "--version"], log=None)
         add(CheckItem("python", "Python 3", "ok", ver or py, required=True))
     else:
-        add(CheckItem("python", "Python 3", "missing", "Nicht installiert (Launcher + Tools)", required=True))
+        add(CheckItem("python", "Python 3", "missing", "Not installed (tools / scripts)", required=True))
 
     # CMake
     cmake = which("cmake")
@@ -360,9 +390,9 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
         if pv and pv >= MIN_CMAKE:
             add(CheckItem("cmake", "CMake", "ok", ver.splitlines()[0] if ver else cmake, required=True))
         else:
-            add(CheckItem("cmake", "CMake", "warn", f"Zu alt oder unbekannt: {ver}", required=True))
+            add(CheckItem("cmake", "CMake", "warn", f"Too old or unknown: {ver}", required=True))
     else:
-        add(CheckItem("cmake", "CMake", "missing", ">= 3.22.1 benötigt", required=True))
+        add(CheckItem("cmake", "CMake", "missing", ">= 3.22.1 required", required=True))
 
     # Ninja
     ninja = which("ninja")
@@ -370,7 +400,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
         code, ver = run(["ninja", "--version"], log=None)
         add(CheckItem("ninja", "Ninja", "ok", ver or ninja, required=True))
     else:
-        add(CheckItem("ninja", "Ninja", "missing", "Build-Generator fehlt", required=True))
+        add(CheckItem("ninja", "Ninja", "missing", "Build generator missing", required=True))
 
     # WinLibs GCC 15.2
     gcc = WINLIBS_ROOT / "mingw64" / "bin" / "gcc.exe"
@@ -401,7 +431,7 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                         "winlibs",
                         "WinLibs GCC 15.2.0",
                         "warn",
-                        f"Anderer GCC gefunden ({line}) — Projekt verlangt WinLibs 15.2.0",
+                        f"Other GCC found ({line}) — project expects WinLibs 15.2.0",
                         required=True,
                     )
                 )
@@ -411,26 +441,34 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
                     "winlibs",
                     "WinLibs GCC 15.2.0",
                     "missing",
-                    f"Erwartet unter {WINLIBS_ROOT}",
+                    f"Expected under {WINLIBS_ROOT}",
                     required=True,
                 )
             )
 
-    # Repo / git remote
+    # Repo / git remote — "todo" = expected next Setup step, not a broken install
     git_dir = repo_root / ".git"
     if git_dir.exists():
         code, remote = run(["git", "remote", "get-url", "origin"], cwd=repo_root, log=None)
         if code == 0:
-            add(CheckItem("repo", "Git-Repository", "ok", remote, required=True, fixable=False))
+            add(CheckItem("repo", "AnyPS5 source", "ok", remote, required=True, fixable=False))
         else:
-            add(CheckItem("repo", "Git-Repository", "warn", "Lokal vorhanden, origin fehlt", required=True))
+            add(
+                CheckItem(
+                    "repo",
+                    "AnyPS5 source",
+                    "warn",
+                    "Folder exists but git origin is missing",
+                    required=True,
+                )
+            )
     else:
         add(
             CheckItem(
                 "repo",
-                "Git-Repository",
-                "missing",
-                f"Kein .git — Clone von {REPO_URL} nötig",
+                "AnyPS5 source",
+                "todo",
+                f"Not cloned yet — Install / repair will clone into {repo_root}",
                 required=True,
             )
         )
@@ -439,39 +477,71 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
     if (repo_root / ".gitmodules").is_file():
         sdl = repo_root / "3rdparty" / "SDL2" / "CMakeLists.txt"
         if sdl.is_file():
-            add(CheckItem("submodules", "Submodules", "ok", "3rdparty vorhanden", required=True))
+            add(CheckItem("submodules", "Submodules", "ok", "3rdparty ready", required=True))
         else:
             add(
                 CheckItem(
                     "submodules",
                     "Submodules",
-                    "missing",
-                    "gitmodules da, aber 3rdparty leer — submodule update nötig",
+                    "todo",
+                    "gitmodules present, 3rdparty empty — Install runs submodule update",
                     required=True,
                 )
             )
+    elif git_dir.exists():
+        add(
+            CheckItem(
+                "submodules",
+                "Submodules",
+                "todo",
+                "Source present but submodules not initialized yet",
+                required=True,
+            )
+        )
     else:
-        add(CheckItem("submodules", "Submodules", "missing", ".gitmodules fehlt", required=True))
+        add(
+            CheckItem(
+                "submodules",
+                "Submodules",
+                "todo",
+                "After clone, Install initializes submodules automatically",
+                required=True,
+            )
+        )
 
-    # Flask / launcher deps
-    try:
-        import flask  # noqa: F401
+    # Flask / launcher deps (frozen build already bundles these)
+    if getattr(sys, "frozen", False):
+        add(CheckItem("flask", "Launcher Python deps", "ok", "Bundled in exe", required=True, fixable=False))
+    else:
+        try:
+            import flask  # noqa: F401
 
-        add(CheckItem("flask", "Python Flask", "ok", "Installiert", required=True, fixable=True))
-    except ImportError:
-        add(CheckItem("flask", "Python Flask", "missing", "pip install flask", required=True))
+            add(CheckItem("flask", "Launcher Python deps", "ok", "Installed", required=True, fixable=True))
+        except ImportError:
+            add(CheckItem("flask", "Launcher Python deps", "missing", "pip install flask", required=True))
 
-    # Build artifacts (optional)
+    # Build artifacts (optional) — never a Setup install failure
     relinker = repo_root / "build" / "core" / "relinker" / "relinker.exe"
     if relinker.is_file():
         add(CheckItem("build", "AnyPS5 Build", "ok", str(relinker), required=False, fixable=True))
+    elif git_dir.exists():
+        add(
+            CheckItem(
+                "build",
+                "AnyPS5 Build",
+                "todo",
+                "Source ready — next step is Build → Full Rebuild (not Setup)",
+                required=False,
+                fixable=True,
+            )
+        )
     else:
         add(
             CheckItem(
                 "build",
                 "AnyPS5 Build",
-                "warn",
-                "Noch nicht gebaut — nach Setup Full Rebuild",
+                "todo",
+                "After Setup clones the source, use Build → Full Rebuild",
                 required=False,
                 fixable=True,
             )
@@ -485,29 +555,41 @@ def audit(repo_root: Path, log: LogFn | None = None) -> AuditReport:
             headers={"User-Agent": "AnyPS5-Setup"},
         )
         with urllib.request.urlopen(req, timeout=15) as resp:
-            add(CheckItem("github", "GitHub erreichbar", "ok", f"HTTP {resp.status}", required=False, fixable=False))
+            add(CheckItem("github", "GitHub reachable", "ok", f"HTTP {resp.status}", required=False, fixable=False))
     except Exception as e:
         add(
             CheckItem(
                 "github",
-                "GitHub erreichbar",
+                "GitHub reachable",
                 "error",
-                f"Nicht erreichbar: {e}",
+                f"Unreachable: {e}",
                 required=False,
                 fixable=False,
             )
         )
 
-    missing = [c.name for c in checks if c.required and c.status in ("missing", "error")]
+    tool_ids = {"git", "python", "cmake", "ninja", "winlibs", "flask"}
+    tool_missing = [
+        c.name for c in checks if c.id in tool_ids and c.required and c.status in ("missing", "error")
+    ]
+    next_steps = [c.name for c in checks if c.status == "todo"]
+    # Required setup complete when tools + repo + submodules are ok (build is optional)
+    setup_blocking = [
+        c.name
+        for c in checks
+        if c.required and c.status in ("missing", "error", "todo")
+    ]
     report = AuditReport(
         checks=checks,
         isAdmin=admin,
         repoRoot=str(repo_root),
-        allRequiredOk=len(missing) == 0,
-        missingRequired=missing,
+        allRequiredOk=len(setup_blocking) == 0,
+        missingRequired=tool_missing,
+        nextSteps=next_steps,
+        toolsOk=len(tool_missing) == 0,
         timestamp=datetime.now(timezone.utc).isoformat(),
     )
-    _log(log, f"=== Audit fertig: {len(missing)} Pflicht-Probleme ===")
+    _log(log, f"=== Audit done: {len(tool_missing)} tool issue(s), {len(next_steps)} next step(s) ===")
     return report
 
 

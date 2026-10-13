@@ -33,12 +33,92 @@ INPUT_INI_PATH = DATA_DIR / "anyps5-input.ini"
 INPUT_PROFILE_PATH = DATA_DIR / "input-profile.json"
 
 
+def _is_anyps5_tree(path: Path) -> bool:
+    return (path / ".git").exists() or (path / "CMakeLists.txt").is_file()
+
+
+def detect_default_anyps5_root() -> Path:
+    """Prefer an existing AnyPS5 next to this launcher (e.g. F:\\PS5-Games\\AnyPS5)."""
+    env = str(os.environ.get("ANYPS5_ROOT") or "").strip().strip('"')
+    if env:
+        return Path(env)
+
+    starts: list[Path] = []
+    for p in (DATA_DIR, LAUNCHER_DIR, Path.cwd()):
+        try:
+            starts.append(p.resolve())
+        except Exception:
+            pass
+    if not getattr(sys, "frozen", False):
+        try:
+            starts.append(Path(__file__).resolve().parent.parent)
+        except Exception:
+            pass
+
+    candidates: list[Path] = []
+    for start in starts:
+        cur = start
+        for _ in range(8):
+            candidates.append(cur / "AnyPS5")
+            if cur.name.lower() == "anyps5-launcher":
+                candidates.append(cur.parent / "AnyPS5")
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+
+    seen: set[str] = set()
+    unique: list[Path] = []
+    for c in candidates:
+        key = str(c).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(c)
+
+    for c in unique:
+        if _is_anyps5_tree(c):
+            return c.resolve()
+
+    # Not cloned yet: still prefer sibling of AnyPS5-Launcher over %USERPROFILE%
+    for c in unique:
+        if c.parent.name.lower() != "appdata" and "users" not in str(c).lower()[:20]:
+            # Prefer paths under the same drive/folder tree as the launcher project
+            for start in starts:
+                try:
+                    if c.drive.lower() == start.drive.lower() and "anyps5-launcher" in str(start).lower():
+                        return c.resolve()
+                except Exception:
+                    pass
+
+    for start in starts:
+        cur = start
+        for _ in range(8):
+            if cur.name.lower() == "anyps5-launcher":
+                return (cur.parent / "AnyPS5").resolve()
+            if cur.parent == cur:
+                break
+            cur = cur.parent
+
+    return Path(os.environ.get("USERPROFILE") or str(Path.home())) / "AnyPS5"
+
+
 def get_repo_root() -> Path:
     cfg = load_config()
     raw = str(cfg.get("anyps5Root") or "").strip().strip('"')
+    detected = detect_default_anyps5_root()
     if raw:
-        return Path(raw)
-    return Path(os.environ.get("USERPROFILE") or str(Path.home())) / "AnyPS5"
+        chosen = Path(raw)
+        # Migrate away from empty/wrong USERPROFILE default when a real tree exists nearby
+        if _is_anyps5_tree(chosen):
+            return chosen
+        if _is_anyps5_tree(detected) and chosen.resolve() != detected.resolve():
+            cfg["anyps5Root"] = str(detected)
+            save_config(cfg)
+            return detected
+        return chosen
+    cfg["anyps5Root"] = str(detected)
+    save_config(cfg)
+    return detected
 
 
 def get_build_dir() -> Path:
@@ -78,7 +158,7 @@ _job: dict = {
 
 def _default_config() -> dict:
     return {
-        "anyps5Root": str(Path(os.environ.get("USERPROFILE") or str(Path.home())) / "AnyPS5"),
+        "anyps5Root": "",
         "lastGameRoot": "",
         "lastOutputDir": "",
         "lastOutputExe": "",
@@ -323,8 +403,14 @@ def build_status() -> dict:
     needs_rebuild = False
     sync_state = "missing"
     sync_label = "No build"
+    root = get_repo_root()
+    repo_present = _is_anyps5_tree(root)
 
-    if not ready:
+    if not repo_present:
+        sync_state = "need_setup"
+        sync_label = "AnyPS5 is not cloned yet. Open Setup and click Install / repair."
+        needs_rebuild = False
+    elif not ready:
         sync_state = "missing"
         sync_label = "Not built yet. Open Build and run Build now."
         needs_rebuild = True
@@ -346,6 +432,7 @@ def build_status() -> dict:
         "relinkerPath": str(get_relinker()),
         "prxCount": prx,
         "ready": ready,
+        "repoPresent": repo_present,
         "winlibs": (WINLIBS_BIN / "gcc.exe").is_file(),
         "cmake": (CMAKE_BIN / "cmake.exe").is_file() or bool(run_capture(["where", "cmake"])[0] == 0),
         "headCommit": head_full,

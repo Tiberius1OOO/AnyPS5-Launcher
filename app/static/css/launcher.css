@@ -679,7 +679,22 @@ select option { background: #0d1219; }
 .setup-item .st.warn { color: var(--warn); border-color: rgba(251, 191, 36, 0.4); }
 .setup-item .st.running { color: #60a5fa; border-color: rgba(96, 165, 250, 0.45); }
 .setup-item .st.pending { color: var(--muted); }
+.setup-item .st.todo { color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); }
 .setup-item .st.skipped { color: var(--muted); }
+.st-inline.todo {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 0.72rem;
+  text-transform: uppercase;
+  padding: 0.1rem 0.35rem;
+  border: 1px solid rgba(96, 165, 250, 0.4);
+  color: #60a5fa;
+}
+.setup-progress-detail {
+  margin: 0 0 0.45rem;
+  font-size: 0.88rem;
+}
+#setupStepList { flex: 0 0 auto; max-height: 14rem; }
 .setup-item .name { font-weight: 600; margin-bottom: 0.2rem; }
 .setup-item .detail { color: var(--muted); font-size: 0.88rem; font-family: var(--font-mono); word-break: break-word; }
 

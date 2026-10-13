@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/launcher.css?v=16" />
+  <link rel="stylesheet" href="/static/css/launcher.css?v=17" />
 </head>
 <body class="boot-pending">
   <div class="bg" aria-hidden="true"></div>
@@ -81,24 +81,38 @@
             <button class="btn compact" id="btnSetupElevate" type="button">Run as admin</button>
           </div>
         </div>
+        <label class="field">
+          <span>AnyPS5 install folder</span>
+          <div class="row">
+            <input id="anyps5Root" type="text" spellcheck="false" placeholder="e.g. F:\PS5-Games\AnyPS5" />
+            <button class="btn compact" type="button" id="btnBrowseAnyps5Root" data-kind="folder">Browse</button>
+            <button class="btn compact" type="button" id="btnSaveAnyps5Root">Save</button>
+          </div>
+          <p class="hint" style="margin-top:0.35rem">This is where AnyPS5 source lives (clone target). Not the launcher folder.</p>
+        </label>
         <div class="action-row">
           <button class="btn primary large" id="btnSetupInstall" type="button">Install / repair everything</button>
           <span class="badge" id="setupBadge">-</span>
         </div>
-        <div class="setup-progress" id="setupProgressWrap" hidden>
+        <div class="setup-progress" id="setupProgressWrap">
           <div class="setup-progress-meta">
+            <strong>Install progress</strong>
             <span id="setupProgressLabel">0 / 0</span>
-            <span id="setupProgressDetail" class="muted"></span>
           </div>
+          <div class="setup-progress-detail muted" id="setupProgressDetail">Waiting — start Install / repair</div>
           <div class="setup-progress-bar" aria-hidden="true">
             <div class="setup-progress-fill" id="setupProgressFill"></div>
           </div>
         </div>
-        <div class="setup-list" id="setupStepList" hidden></div>
+        <h3 class="subhead">Install steps</h3>
+        <div class="setup-list" id="setupStepList">
+          <p class="empty">Loading steps…</p>
+        </div>
+        <h3 class="subhead">PC checklist</h3>
         <div class="setup-list" id="setupList">
           <p class="empty">Loading...</p>
         </div>
-        <p class="hint">Live step status appears above. Full detail stays in the <strong>Console</strong> tab.</p>
+        <p class="hint"><span class="st-inline todo">next</span> = expected first-run step (not broken). Full log in <strong>Console</strong>.</p>
       </section>
 
       <section class="panel" id="tab-controls">
@@ -302,6 +316,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
-  <script src="/static/js/launcher.js?v=16"></script>
+  <script src="/static/js/launcher.js?v=17"></script>
 </body>
 </html>

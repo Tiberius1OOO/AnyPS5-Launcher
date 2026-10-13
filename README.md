@@ -36,8 +36,13 @@ Next time, use **`Start-AnyPS5.cmd`** (no need to reinstall).
 | **Readme** | Upstream AnyPS5 README |
 | **Console** | Live install / build / convert log |
 
-Default AnyPS5 install folder: `%USERPROFILE%\AnyPS5`  
-(configurable in launcher config as `anyps5Root`).
+**AnyPS5 install folder** (footer + Setup field): where the AnyPS5 *source* lives / will be cloned — not the launcher zip folder.
+
+- Auto-detected when this launcher sits next to an existing tree (e.g. `F:\PS5-Games\AnyPS5` beside `AnyPS5-Launcher`)
+- Otherwise defaults to `%USERPROFILE%\AnyPS5`
+- Change anytime under **Setup → AnyPS5 install folder** (Browse / Save)
+
+`next` rows in the checklist are expected first-run steps (clone / submodules / build), not broken tool installs. Use **Install / repair** for clone+tools; use **Build** only after the source is present.
 
 ---
 
