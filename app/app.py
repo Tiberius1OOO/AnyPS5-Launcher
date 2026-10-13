@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import threading
@@ -291,13 +292,84 @@ def path_spaces_error(path: Path | str) -> str:
     )
 
 
+def find_python3_executable() -> Path | None:
+    """
+    Resolve a real python.exe for CMake FindPython3.
+    `py.exe` alone is not enough; glslang's StandAlone CMake needs Python3_EXECUTABLE.
+    """
+    candidates: list[Path] = []
+    for name in ("python", "python3"):
+        hit = shutil.which(name)
+        if hit:
+            candidates.append(Path(hit))
+    # Windows py launcher -> actual interpreter
+    py = shutil.which("py")
+    if py:
+        try:
+            p = subprocess.run(
+                [py, "-3", "-c", "import sys; print(sys.executable)"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                shell=False,
+            )
+            line = (p.stdout or "").strip().splitlines()
+            if p.returncode == 0 and line:
+                candidates.append(Path(line[0].strip()))
+        except Exception:
+            pass
+    # Frozen launcher still has a host Python for build tools if installed
+    if not getattr(sys, "frozen", False) and sys.executable:
+        candidates.append(Path(sys.executable))
+
+    seen: set[str] = set()
+    for cand in candidates:
+        try:
+            resolved = cand.resolve()
+        except Exception:
+            resolved = cand
+        key = str(resolved).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        name = resolved.name.lower()
+        if name in ("py.exe", "py"):
+            continue
+        if not resolved.is_file():
+            continue
+        try:
+            p = subprocess.run(
+                [str(resolved), "-c", "import sys; print(sys.version_info[0])"],
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                shell=False,
+            )
+            if p.returncode == 0 and (p.stdout or "").strip().startswith("3"):
+                return resolved
+        except Exception:
+            continue
+    return None
+
+
 def tool_env() -> dict:
     env = os.environ.copy()
     parts = [
         str(CMAKE_BIN),
         str(WINLIBS_BIN),
-        env.get("Path", env.get("PATH", "")),
     ]
+    py = find_python3_executable()
+    if py is not None:
+        parts.append(str(py.parent))
+        # Scripts/ often holds useful tools next to python.exe
+        scripts = py.parent / "Scripts"
+        if scripts.is_dir():
+            parts.append(str(scripts))
+    parts.append(env.get("Path", env.get("PATH", "")))
     env["Path"] = ";".join(p for p in parts if p)
     env["PATH"] = env["Path"]
     if SSL_CERT.exists():
@@ -399,30 +471,70 @@ def _reset_job_log(kind: str) -> None:
 
 
 def _failure_snippets(lines: list[str], limit: int = 12) -> list[str]:
-    keys = (
-        "error",
-        "failed",
-        "fatal",
-        "exception",
-        "undefined reference",
-        "cannot find",
-        "no such file",
-        "cmake error",
-        "ninja: build stopped",
-        "permission denied",
-        "not found",
+    """Pick real failure lines; ignore normal CMake feature-probe noise."""
+    noise_prefixes = (
+        "-- looking for ",
+        "-- performing test ",
+        "-- check for working ",
+        "-- detecting ",
+        "-- found ",
     )
-    hits: list[str] = []
-    for line in lines:
+    strong_keys = (
+        "cmake error",
+        "could not find",
+        "could NOT find",
+        "fatal error",
+        "ninja: build stopped",
+        "undefined reference",
+        "permission denied",
+        "windres",
+        "error: exit code",
+    )
+    weak_keys = (
+        "error:",
+        "fatal:",
+        "failed:",
+        "no such file",
+        "cannot find",
+    )
+    strong: list[str] = []
+    weak: list[str] = []
+    for i, line in enumerate(lines):
         s = line.strip()
         if not s:
             continue
         low = s.lower()
-        if any(k in low for k in keys):
-            hits.append(s)
+        if low.startswith(noise_prefixes) and "cmake error" not in low:
+            continue
+        if "looking for " in low and " - not found" in low:
+            continue
+        if "performing test " in low and " - failed" in low:
+            continue
+        if any(k.lower() in low or k in s for k in strong_keys):
+            strong.append(s)
+            # Include the next non-empty line (often "Could NOT find …")
+            for nxt in lines[i + 1 : i + 4]:
+                t = nxt.strip()
+                if not t:
+                    continue
+                if t.lower().startswith("-- ") and "error" not in t.lower():
+                    break
+                strong.append(t)
+                break
+            continue
+        if any(k in low for k in weak_keys):
+            weak.append(s)
+    hits = strong or weak
     if hits:
-        return hits[-limit:]
-    # Fall back to the last non-empty lines so the log is still useful
+        # Dedupe while keeping order
+        out: list[str] = []
+        seen: set[str] = set()
+        for h in hits:
+            if h in seen:
+                continue
+            seen.add(h)
+            out.append(h)
+        return out[-limit:]
     nonempty = [ln.strip() for ln in lines if ln.strip()]
     return nonempty[-min(limit, 8) :]
 
@@ -942,12 +1054,24 @@ def api_rebuild():
         return jsonify({"ok": False, "error": "A job is already running."}), 409
     if not (WINLIBS_BIN / "gcc.exe").is_file():
         return jsonify({"ok": False, "error": "WinLibs GCC missing. Run setup first."}), 400
+    python_exe = find_python3_executable()
+    if python_exe is None:
+        return jsonify(
+            {
+                "ok": False,
+                "error": (
+                    "Python 3 was not found on PATH. CMake needs it for glslang during Build. "
+                    "Open Setup → Install / repair everything, then try Build again. "
+                    "If Python is already installed, close and reopen the launcher so PATH updates."
+                ),
+            }
+        ), 400
     paths = space_safe_build_paths()
     if paths is None:
         return jsonify({"ok": False, "error": path_spaces_error(get_repo_root())}), 400
     src, build, how = paths
     cores = str(os.cpu_count() or 4)
-    preamble: list[str] = []
+    preamble: list[str] = [f"Using Python for CMake: {python_exe}"]
     if how != "direct":
         label = "Windows short path" if how == "short-path" else "space-free junction"
         preamble.append(
@@ -964,6 +1088,12 @@ def api_rebuild():
         if "windres" in blob and ("no such file" in blob or path_has_spaces(get_repo_root())):
             append_job("")
             append_job(path_spaces_error(get_repo_root()))
+        if "could not find python3" in blob or "missing: python3_executable" in blob:
+            append_job("")
+            append_job(
+                "CMake could not find Python 3 (needed by glslang). "
+                "Run Setup → Install / repair, ensure python.exe is on PATH, then Build again."
+            )
 
     run_job(
         "Build",
@@ -979,6 +1109,8 @@ def api_rebuild():
                 "-DCMAKE_BUILD_TYPE=Release",
                 "-DCMAKE_C_COMPILER=gcc",
                 "-DCMAKE_CXX_COMPILER=g++",
+                f"-DPython3_EXECUTABLE={python_exe}",
+                f"-DPython3_ROOT_DIR={python_exe.parent}",
             ],
             ["cmake", "--build", str(build), "--parallel", cores],
             ["cmake", "--build", str(build), "--target", "libs", "--parallel", cores],

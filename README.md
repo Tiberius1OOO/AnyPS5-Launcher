@@ -48,6 +48,11 @@ On Setup: **ok** = already present, **next** = still required.
 Folder names with spaces (example: `C:\Games\HYDERA LUNCHER\...`) are supported.  
 During Build the launcher automatically uses a space-free Windows short path or a junction under `ProgramData`, because MinGW `windres` cannot parse spaced include paths. Your install folder does not need to move.
 
+## Python and Build
+
+CMake needs a real `python.exe` on PATH (glslang). Setup installs Python when missing.  
+Build also passes `-DPython3_EXECUTABLE=...` so CMake finds it reliably after install.
+
 ## Build from source
 
 Python 3.11+ on Windows:
