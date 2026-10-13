@@ -1,0 +1,17 @@
+AnyPS5 Launcher (Windows)
+=========================
+
+1) Install-AnyPS5.cmd  — first run (explains admin, starts UI)
+2) Start-AnyPS5.cmd    — later starts
+
+In the browser launcher:
+  Setup  → Install / repair everything  (admin dialog first)
+  Build  → Full Rebuild
+  Convert → pick game folder → Convert → Start
+
+AnyPS5 source is cloned from:
+  https://github.com/boykopovar/AnyPS5
+
+Default folder: %USERPROFILE%\AnyPS5
+
+English UI. Leave the launcher window open while using it.

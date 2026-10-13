@@ -1,0 +1,307 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>AnyPS5 Launcher</title>
+  <link rel="icon" href="/static/img/app-icon.ico" type="image/x-icon" />
+  <link rel="apple-touch-icon" href="/static/img/app-icon.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="/static/css/launcher.css?v=16" />
+</head>
+<body class="boot-pending">
+  <div class="bg" aria-hidden="true"></div>
+  <div class="grain" aria-hidden="true"></div>
+
+  <div id="bootSplash" class="boot-splash" hidden aria-hidden="true">
+    <img id="bootLogo" class="boot-logo" src="/static/img/brand-logo.png" alt="" />
+  </div>
+
+  <div class="shell" id="appShell">
+    <header class="hero">
+      <div class="hero-copy">
+        <div class="brand-row">
+          <div class="brand-dock" id="brandDock">
+            <img id="brandLogo" class="brand-logo" src="/static/img/brand-logo.png" alt="Logo" />
+          </div>
+          <div>
+            <p class="eyebrow">AnyPS5</p>
+            <h1>Launcher</h1>
+          </div>
+        </div>
+        <p class="tagline">Install tools, update, build, convert a game, then start it.</p>
+        <div class="hero-actions">
+          <button class="btn primary" id="btnStart" type="button">Start game</button>
+          <button class="btn ghost" id="btnUpdateCheck" type="button">Check updates</button>
+        </div>
+      </div>
+      <div class="hero-panel" id="statusPanel">
+        <div class="stat">
+          <span class="stat-label">Branch</span>
+          <span class="stat-value" id="statBranch">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Version</span>
+          <span class="stat-value mono" id="statHead">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Updates</span>
+          <span class="stat-value" id="statUpdate">-</span>
+        </div>
+        <div class="stat">
+          <span class="stat-label">Build</span>
+          <span class="stat-value" id="statBuild">-</span>
+        </div>
+      </div>
+    </header>
+
+    <div class="alerts" id="alerts" hidden></div>
+
+    <nav class="tabs" role="tablist">
+      <button class="tab active" data-tab="setup" type="button">Setup</button>
+      <button class="tab" data-tab="controls" type="button">Controls</button>
+      <button class="tab" data-tab="convert" type="button">Convert</button>
+      <button class="tab" data-tab="updates" type="button">Updates</button>
+      <button class="tab" data-tab="readme" type="button">README</button>
+      <button class="tab" data-tab="build" type="button">Build</button>
+      <button class="tab" data-tab="log" type="button">Console</button>
+    </nav>
+
+    <main>
+      <section class="panel active" id="tab-setup">
+        <div class="panel-head row-between">
+          <div>
+            <h2>Setup</h2>
+            <p>Install everything this PC needs. Use this once (or after a problem).</p>
+          </div>
+          <div class="action-row" style="margin:0">
+            <button class="btn compact" id="btnSetupAudit" type="button">Re-check</button>
+            <button class="btn compact" id="btnSetupElevate" type="button">Run as admin</button>
+          </div>
+        </div>
+        <div class="action-row">
+          <button class="btn primary large" id="btnSetupInstall" type="button">Install / repair everything</button>
+          <span class="badge" id="setupBadge">-</span>
+        </div>
+        <div class="setup-progress" id="setupProgressWrap" hidden>
+          <div class="setup-progress-meta">
+            <span id="setupProgressLabel">0 / 0</span>
+            <span id="setupProgressDetail" class="muted"></span>
+          </div>
+          <div class="setup-progress-bar" aria-hidden="true">
+            <div class="setup-progress-fill" id="setupProgressFill"></div>
+          </div>
+        </div>
+        <div class="setup-list" id="setupStepList" hidden></div>
+        <div class="setup-list" id="setupList">
+          <p class="empty">Loading...</p>
+        </div>
+        <p class="hint">Live step status appears above. Full detail stays in the <strong>Console</strong> tab.</p>
+      </section>
+
+      <section class="panel" id="tab-controls">
+        <div class="panel-head row-between">
+          <div>
+            <h2>Controls</h2>
+            <p>Map keyboard and mouse. Controllers work automatically.</p>
+          </div>
+          <div class="action-row" style="margin:0">
+            <button class="btn compact" id="btnInputReset" type="button">Reset defaults</button>
+            <button class="btn compact primary" id="btnInputSave" type="button">Save</button>
+          </div>
+        </div>
+
+        <p class="listen-banner" id="listenHint" hidden></p>
+        <div class="key-grid" id="keyGrid"></div>
+        <div class="action-row">
+          <button class="btn compact" id="btnInputExportJson" type="button">Export</button>
+          <button class="btn compact" id="btnInputExportIni" type="button">Export INI</button>
+          <button class="btn compact" id="btnInputImport" type="button">Import</button>
+          <input id="inputImportFile" type="file" accept=".json,.ini,.txt" hidden />
+        </div>
+      </section>
+
+      <section class="panel" id="tab-convert">
+        <div class="panel-head">
+          <h2>Convert game</h2>
+          <p>Choose your game folder and where to save the Windows build.</p>
+        </div>
+
+        <div class="form-grid">
+          <label class="field">
+            <span>Game folder</span>
+            <div class="row">
+              <input id="gameRoot" type="text" placeholder="F:\Games\MyGame" spellcheck="false" />
+              <button class="btn compact" type="button" data-browse="gameRoot" data-kind="folder">Browse</button>
+            </div>
+          </label>
+
+          <label class="field">
+            <span>Output folder</span>
+            <div class="row">
+              <input id="outputDir" type="text" placeholder="Leave empty for game\anyps5-out" spellcheck="false" />
+              <button class="btn compact" type="button" data-browse="outputDir" data-kind="folder">Browse</button>
+            </div>
+          </label>
+
+          <div class="form-row-3">
+            <label class="field">
+              <span class="field-label">
+                Output name
+                <button type="button" class="tip" aria-label="Help" data-tip="Filename of the converted Windows game (usually app.exe)."></button>
+              </span>
+              <input id="outputName" type="text" value="app.exe" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="field-label">
+                GPU name filter
+                <button type="button" class="tip" aria-label="Help" data-tip="If you have several GPUs, type part of the GPU name (e.g. 5080) so the game uses that one. Leave empty for automatic."></button>
+              </span>
+              <input id="gpuFilter" type="text" placeholder="Optional, e.g. 5080" spellcheck="false" />
+            </label>
+            <label class="field">
+              <span class="field-label">
+                Cleanup level
+                <button type="button" class="tip" aria-label="Help" data-tip="How aggressively unused imports are removed. Normal keeps everything (safest). Stronger removes unused ones. Strict removes more and can fail on some games."></button>
+              </span>
+              <select id="unusedFilter">
+                <option value="0">Normal (safest)</option>
+                <option value="1">Stronger</option>
+                <option value="2">Strict</option>
+              </select>
+            </label>
+          </div>
+
+          <details class="advanced">
+            <summary>Advanced options</summary>
+            <div class="checks">
+              <label class="check">
+                <input type="checkbox" id="toIntel" />
+                Intel CPU compatibility
+                <button type="button" class="tip" aria-label="Help" data-tip="Turn this on if your PC has an Intel CPU. PS5 code can use AMD-only instructions; this converts supported ones so Intel CPUs can run the game. Leave off on AMD CPUs. If convert fails after enabling it, the game may use unsupported instructions."></button>
+              </label>
+              <label class="check">
+                <input type="checkbox" id="windowsGui" />
+                Hide console window
+                <button type="button" class="tip" aria-label="Help" data-tip="Starts the game without a black console window behind it. Slightly harder to see crash text if something goes wrong."></button>
+              </label>
+            </div>
+          </details>
+
+          <div class="action-row">
+            <button class="btn primary large" id="btnConvert" type="button">Convert</button>
+            <button class="btn large" id="btnStart2" type="button">Start game</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-updates">
+        <div class="panel-head">
+          <h2>Updates</h2>
+          <p>Check for new versions and download them.</p>
+        </div>
+        <div class="action-row">
+          <button class="btn primary" id="btnFetch" type="button">Check now</button>
+          <button class="btn" id="btnPull" type="button">Download updates</button>
+          <button class="btn" id="btnOpenGithub" type="button">Open on GitHub</button>
+          <span class="badge" id="updateBadge">-</span>
+        </div>
+        <div class="split">
+          <div>
+            <h3>Available updates</h3>
+            <div class="commit-list" id="pendingLog">
+              <p class="empty">Not checked yet.</p>
+            </div>
+          </div>
+          <div>
+            <h3>Recent history</h3>
+            <div class="commit-list" id="localLog">
+              <p class="empty">Loading...</p>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-readme">
+        <div class="panel-head row-between">
+          <div>
+            <h2>README</h2>
+            <p>Project notes from GitHub.</p>
+          </div>
+          <div class="action-row" style="margin:0">
+            <button class="btn compact" id="btnReloadReadme" type="button">Reload</button>
+            <button class="btn compact" id="btnOpenGithubReadme" type="button">Open on GitHub</button>
+          </div>
+        </div>
+        <p class="hint" id="readmeMeta">Not loaded yet.</p>
+        <article class="readme-body" id="readmeBody">
+          <p class="empty">Open this tab to load the README.</p>
+        </article>
+      </section>
+
+      <section class="panel" id="tab-build">
+        <div class="panel-head">
+          <h2>Build</h2>
+          <p>Compile AnyPS5 after setup or after downloading updates.</p>
+        </div>
+        <p class="hint" id="buildSyncLabel">Loading...</p>
+        <div class="build-cards">
+          <div class="mini"><span>Converter</span><strong id="bRelinker">-</strong></div>
+          <div class="mini"><span>System libs</span><strong id="bPrx">-</strong></div>
+          <div class="mini"><span>Compiler</span><strong id="bGcc">-</strong></div>
+          <div class="mini"><span>Build tools</span><strong id="bCmake">-</strong></div>
+        </div>
+        <div class="action-row">
+          <button class="btn primary large" id="btnRebuild" type="button">Build now</button>
+          <button class="btn" id="btnMarkBuild" type="button">Mark as up to date</button>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-log">
+        <div class="panel-head row-between">
+          <div>
+            <h2>Console</h2>
+            <p>Live log for install, update, build, and convert.</p>
+          </div>
+          <button class="btn compact" id="btnClearLog" type="button">Clear</button>
+        </div>
+        <pre class="console" id="console">Ready.</pre>
+      </section>
+    </main>
+
+    <footer class="foot">
+      <span id="jobStatus">Ready</span>
+      <span class="mono" id="repoPath"></span>
+    </footer>
+  </div>
+
+  <div class="toast" id="toast" hidden></div>
+  <div class="tip-bubble" id="tipBubble" role="tooltip" hidden></div>
+
+  <div class="modal-backdrop" id="adminWhyModal" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="adminWhyTitle">
+      <h3 id="adminWhyTitle">Why administrator access may be needed</h3>
+      <p id="adminWhyBody">
+        Installing Git, Python, or CMake usually writes into Program Files.
+        WinLibs is extracted under C:\winlibs. winget package installs often require elevation.
+        The launcher itself does not need admin to run.
+      </p>
+      <ul class="modal-list">
+        <li>Git / Python / CMake → Program Files</li>
+        <li>WinLibs GCC → C:\winlibs</li>
+        <li>winget install often needs UAC</li>
+      </ul>
+      <div class="action-row modal-actions">
+        <button class="btn primary" id="btnAdminContinue" type="button">Continue with admin</button>
+        <button class="btn" id="btnAdminWithout" type="button">Try without admin</button>
+        <button class="btn compact" id="btnAdminCancel" type="button">Cancel</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
+  <script src="/static/js/launcher.js?v=16"></script>
+</body>
+</html>

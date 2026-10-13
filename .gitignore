@@ -1,0 +1,29 @@
+# Build / release
+dist/
+build/
+*.spec.bak
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.env
+*.egg-info/
+
+# Local launcher state (user machine)
+**/launcher-config.json
+**/setup-state.json
+**/input-profile.json
+app/anyps5-input.ini
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.log
+
+# Patch helpers (dev only)
+scripts/_patch_*.py
