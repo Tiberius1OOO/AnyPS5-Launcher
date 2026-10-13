@@ -3,7 +3,7 @@ setlocal EnableDelayedExpansion
 title AnyPS5 Launcher
 cd /d "%~dp0.."
 
-REM Prefer frozen release next to this scripts folder (dev) or package root (release zip)
+REM Prefer frozen release next to scripts (dev) or package root (release zip)
 set "EXE="
 if exist "%~dp0..\AnyPS5Launcher.exe" set "EXE=%~dp0..\AnyPS5Launcher.exe"
 if exist "%~dp0AnyPS5Launcher.exe" set "EXE=%~dp0AnyPS5Launcher.exe"
@@ -30,6 +30,5 @@ where py >nul 2>&1 && (
 )
 
 echo [ERROR] No AnyPS5Launcher.exe and no Python found.
-echo Install Python 3 or use the release zip build.
 pause
 exit /b 1

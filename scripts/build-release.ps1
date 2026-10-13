@@ -81,7 +81,6 @@ if (-not (Test-Path (Join-Path $built "AnyPS5Launcher.exe"))) {
 
 Write-Host "==> Stage release folder..." -ForegroundColor Cyan
 Copy-Item -Recurse -Force (Join-Path $built "*") $stage
-Copy-Item -Force (Join-Path $PSScriptRoot "Install-AnyPS5.cmd") (Join-Path $stage "Install-AnyPS5.cmd")
 # Release Start script: exe is beside the cmd
 @"
 @echo off
@@ -95,30 +94,6 @@ echo [ERROR] AnyPS5Launcher.exe missing.
 pause
 exit /b 1
 "@ | Set-Content -Path (Join-Path $stage "Start-AnyPS5.cmd") -Encoding ASCII
-
-# Install script for release package (self-contained)
-@"
-@echo off
-setlocal
-title AnyPS5 Launcher — Install
-cd /d "%~dp0"
-echo.
-echo ========================================
-echo   AnyPS5 Launcher — first run
-echo ========================================
-echo.
-echo Why administrator access may be needed later:
-echo   - Git / Python / CMake often install into Program Files
-echo   - WinLibs GCC is extracted under C:\winlibs
-echo   - winget package installs usually need UAC
-echo.
-echo The launcher itself does NOT need admin to open.
-echo You will get a clear dialog before any UAC prompt.
-echo.
-pause
-call "%~dp0Start-AnyPS5.cmd"
-endlocal
-"@ | Set-Content -Path (Join-Path $stage "Install-AnyPS5.cmd") -Encoding ASCII
 
 Copy-Item -Force (Join-Path $PSScriptRoot "LIESMICH.txt") (Join-Path $stage "LIESMICH.txt")
 Copy-Item -Force (Join-Path $Root "README.md") (Join-Path $stage "README.md") -ErrorAction SilentlyContinue

@@ -38,84 +38,20 @@ def _is_anyps5_tree(path: Path) -> bool:
 
 
 def detect_default_anyps5_root() -> Path:
-    """Prefer an existing AnyPS5 next to this launcher (e.g. F:\\PS5-Games\\AnyPS5)."""
+    """AnyPS5 lives inside the folder where this launcher is running from."""
     env = str(os.environ.get("ANYPS5_ROOT") or "").strip().strip('"')
     if env:
         return Path(env)
-
-    starts: list[Path] = []
-    for p in (DATA_DIR, LAUNCHER_DIR, Path.cwd()):
-        try:
-            starts.append(p.resolve())
-        except Exception:
-            pass
-    if not getattr(sys, "frozen", False):
-        try:
-            starts.append(Path(__file__).resolve().parent.parent)
-        except Exception:
-            pass
-
-    candidates: list[Path] = []
-    for start in starts:
-        cur = start
-        for _ in range(8):
-            candidates.append(cur / "AnyPS5")
-            if cur.name.lower() == "anyps5-launcher":
-                candidates.append(cur.parent / "AnyPS5")
-            if cur.parent == cur:
-                break
-            cur = cur.parent
-
-    seen: set[str] = set()
-    unique: list[Path] = []
-    for c in candidates:
-        key = str(c).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(c)
-
-    for c in unique:
-        if _is_anyps5_tree(c):
-            return c.resolve()
-
-    # Not cloned yet: still prefer sibling of AnyPS5-Launcher over %USERPROFILE%
-    for c in unique:
-        if c.parent.name.lower() != "appdata" and "users" not in str(c).lower()[:20]:
-            # Prefer paths under the same drive/folder tree as the launcher project
-            for start in starts:
-                try:
-                    if c.drive.lower() == start.drive.lower() and "anyps5-launcher" in str(start).lower():
-                        return c.resolve()
-                except Exception:
-                    pass
-
-    for start in starts:
-        cur = start
-        for _ in range(8):
-            if cur.name.lower() == "anyps5-launcher":
-                return (cur.parent / "AnyPS5").resolve()
-            if cur.parent == cur:
-                break
-            cur = cur.parent
-
-    return Path(os.environ.get("USERPROFILE") or str(Path.home())) / "AnyPS5"
+    # Frozen: next to AnyPS5Launcher.exe. Source: next to app/ (project run dir).
+    return (DATA_DIR / "AnyPS5").resolve()
 
 
 def get_repo_root() -> Path:
     cfg = load_config()
     raw = str(cfg.get("anyps5Root") or "").strip().strip('"')
-    detected = detect_default_anyps5_root()
     if raw:
-        chosen = Path(raw)
-        # Migrate away from empty/wrong USERPROFILE default when a real tree exists nearby
-        if _is_anyps5_tree(chosen):
-            return chosen
-        if _is_anyps5_tree(detected) and chosen.resolve() != detected.resolve():
-            cfg["anyps5Root"] = str(detected)
-            save_config(cfg)
-            return detected
-        return chosen
+        return Path(raw)
+    detected = detect_default_anyps5_root()
     cfg["anyps5Root"] = str(detected)
     save_config(cfg)
     return detected

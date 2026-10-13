@@ -11,16 +11,13 @@ This repository is **only the launcher**. It does not patch or fork AnyPS5 core.
 
 1. Download **AnyPS5-Launcher-windows.zip** from [Releases](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases) (or use a local build under `dist/release/`).
 2. Unzip anywhere (e.g. `Desktop\AnyPS5-Launcher`).
-3. Double-click **`Install-AnyPS5.cmd`**.
-4. Read the short admin note, then continue. The launcher UI opens in your browser.
-5. In the **Setup** tab, click **Install / repair everything**.
+3. Start **`AnyPS5Launcher.exe`** (or `Start-AnyPS5.cmd`).
+4. In the **Setup** tab, click **Install / repair everything**.
    - A dialog explains why admin may be needed (Git / Python / CMake into Program Files, WinLibs under `C:\winlibs`).
    - Choose **Continue with admin**, **Try without admin**, or **Cancel**.
-6. Wait until the Setup checklist is green (progress bar + steps update live; full log is in **Console**).
-7. Open **Build** → **Full Rebuild**.
-8. Open **Convert game**, pick your game folder, convert, then **Start game**.
-
-Next time, use **`Start-AnyPS5.cmd`** (no need to reinstall).
+5. Wait until Setup is done (progress bar + steps; full log in **Console**).
+6. Open **Build** → **Full Rebuild**.
+7. Open **Convert game**, pick your game folder, convert, then **Start game**.
 
 ---
 
@@ -36,11 +33,7 @@ Next time, use **`Start-AnyPS5.cmd`** (no need to reinstall).
 | **Readme** | Upstream AnyPS5 README |
 | **Console** | Live install / build / convert log |
 
-**AnyPS5 install folder** (footer + Setup field): where the AnyPS5 *source* lives / will be cloned — not the launcher zip folder.
-
-- Auto-detected when this launcher sits next to an existing tree (e.g. `F:\PS5-Games\AnyPS5` beside `AnyPS5-Launcher`)
-- Otherwise defaults to `%USERPROFILE%\AnyPS5`
-- Change anytime under **Setup → AnyPS5 install folder** (Browse / Save)
+**AnyPS5 install folder** (footer + Setup field): defaults to an `AnyPS5` folder **inside the directory where you run the launcher** (next to the `.exe`). Change anytime under Setup → Browse / Save.
 
 `next` rows in the checklist are expected first-run steps (clone / submodules / build), not broken tool installs. Use **Install / repair** for clone+tools; use **Build** only after the source is present.
 
