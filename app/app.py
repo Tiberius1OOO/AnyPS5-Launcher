@@ -90,6 +90,28 @@ SSL_CERT = Path(r"C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt")
 GITHUB_URL = "https://github.com/boykopovar/AnyPS5"
 GITHUB_README_RAW = "https://raw.githubusercontent.com/boykopovar/AnyPS5/main/README.md"
 
+# Required next to Windows .prx system libs (load fails with error 126 without them).
+MINGW_RUNTIME_DLLS = (
+    "libgcc_s_seh-1.dll",
+    "libstdc++-6.dll",
+    "libwinpthread-1.dll",
+)
+
+# Do not copy into app0: modules are converted by the relinker; skip prior outputs too.
+APP0_SKIP_DIR_NAMES = frozenset(
+    {
+        "sce_module",
+        "sce_modules",
+        "prx",
+        "app0",
+        "libs",
+        "anyps5-out",
+        ".git",
+        "__pycache__",
+    }
+)
+APP0_SKIP_FILE_NAMES = frozenset({"eboot.bin"})
+
 app = Flask(
     __name__,
     template_folder=str(LAUNCHER_DIR / "templates"),
@@ -145,6 +167,25 @@ def path_has_spaces(path: Path | str) -> bool:
     return " " in str(path)
 
 
+def build_path_needs_alias(path: Path | str) -> bool:
+    """
+    True when cmake/MinGW/glslang should run via a shorter space-free alias.
+    Spaces break windres; very deep trees (common under Downloads) can flake
+    custom commands that embed SPIR-V (.spv missing after glslang).
+    """
+    try:
+        text = str(Path(path).resolve())
+    except Exception:
+        text = str(path)
+    if " " in text:
+        return True
+    low = text.lower().replace("/", "\\")
+    if "\\downloads\\" in low:
+        return True
+    # Repo roots under ~60 chars still grow by ~100 inside build/.../generated/...
+    return len(text) >= 60
+
+
 def windows_short_path(path: Path) -> Path | None:
     """Return 8.3 short path if Windows provides one without spaces (helps MinGW windres)."""
     if os.name != "nt":
@@ -194,21 +235,24 @@ def _same_path(a: Path, b: Path) -> bool:
 
 def ensure_space_free_alias(target: Path) -> Path | None:
     """
-    Return a path without spaces that points at target.
-    Order: as-is → Windows short path → directory junction under ProgramData.
-    MinGW windres splits -I paths on spaces; building via a space-free alias fixes that
-    while the user's real folder may still contain spaces.
+    Return a short, space-free path that points at target.
+    Order: as-is (when already fine) → Windows short path → junction under ProgramData.
     """
     target = target.resolve()
-    if not path_has_spaces(target):
+    if not build_path_needs_alias(target):
         return target
 
     short = windows_short_path(target)
-    if short is not None:
+    if short is not None and not build_path_needs_alias(short):
         return short
+    if short is not None and not path_has_spaces(short) and len(str(short)) < len(str(target)):
+        # Prefer shorter even if still slightly long
+        target_for_link = short
+    else:
+        target_for_link = target
 
     if os.name != "nt":
-        return None
+        return short if short is not None and not path_has_spaces(short) else None
 
     import hashlib
 
@@ -216,18 +260,18 @@ def ensure_space_free_alias(target: Path) -> Path | None:
     try:
         mounts.mkdir(parents=True, exist_ok=True)
     except Exception:
-        return None
+        return short if short is not None and not path_has_spaces(short) else None
 
-    dig = hashlib.sha1(str(target).lower().encode("utf-8")).hexdigest()[:16]
+    dig = hashlib.sha1(str(target.resolve()).lower().encode("utf-8")).hexdigest()[:16]
     link = mounts / dig
     if path_has_spaces(link):
-        return None
+        return short if short is not None and not path_has_spaces(short) else None
 
     # Reuse existing junction if it already points here
     if link.exists():
         try:
             current = Path(os.readlink(link))
-            if _same_path(current, target):
+            if _same_path(current, target) or _same_path(current, target_for_link):
                 return link
         except OSError:
             pass
@@ -243,9 +287,9 @@ def ensure_space_free_alias(target: Path) -> Path | None:
                     text=True,
                 )
             except Exception:
-                return None
+                return short if short is not None and not path_has_spaces(short) else None
 
-    # mklink /J does not need admin
+    # mklink /J does not need admin; junction to the real folder (not the short path)
     proc = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(link), str(target)],
         capture_output=True,
@@ -254,13 +298,13 @@ def ensure_space_free_alias(target: Path) -> Path | None:
         errors="replace",
     )
     if proc.returncode != 0 or not link.exists():
-        return None
+        return short if short is not None and not path_has_spaces(short) else None
     return link
 
 
 def space_safe_build_paths() -> tuple[Path, Path, str] | None:
     """
-    Paths for cmake -S/-B that MinGW windres can digest.
+    Paths for cmake -S/-B that MinGW windres / deep Windows custom commands can digest.
     Returns (source, build, how) where how describes the mapping used.
     """
     root = get_repo_root().resolve()
@@ -269,14 +313,19 @@ def space_safe_build_paths() -> tuple[Path, Path, str] | None:
     except Exception:
         pass
 
-    if not path_has_spaces(root):
+    if not build_path_needs_alias(root):
         return root, root / "build", "direct"
 
     alias = ensure_space_free_alias(root)
     if alias is None:
         return None
     short = windows_short_path(root)
-    how = "short-path" if short is not None and _same_path(short, alias) else "junction"
+    if short is not None and _same_path(short, alias):
+        how = "short-path"
+    elif _same_path(alias, root):
+        how = "direct"
+    else:
+        how = "junction"
     build = alias / "build"
     if path_has_spaces(build):
         return None
@@ -285,11 +334,21 @@ def space_safe_build_paths() -> tuple[Path, Path, str] | None:
 
 def path_spaces_error(path: Path | str) -> str:
     return (
-        "Could not create a space-free build alias for MinGW windres. "
+        "Could not create a short build alias for MinGW/glslang. "
         f"Current path: {path}. "
-        "Try moving AnyPS5-Launcher to a simpler drive path, or re-run Build after "
-        "closing programs that lock the folder."
+        "Move AnyPS5-Launcher to a short path such as C:\\AnyPS5-Launcher, then Build again."
     )
+
+
+def _spirv_embed_failure(lines: list[str]) -> bool:
+    blob = "\n".join(lines).lower()
+    if "embed_spirv.cmake" in blob:
+        return True
+    if "failed to open for reading" in blob and ".spv" in blob:
+        return True
+    if "sampledumps.spv" in blob and "no such file" in blob:
+        return True
+    return False
 
 
 def find_python3_executable() -> Path | None:
@@ -588,6 +647,8 @@ def run_job(
     cwd: Path | None = None,
     preamble: list[str] | None = None,
     on_failure=None,
+    retries_per_command: int = 0,
+    should_retry=None,
 ) -> None:
     if _job["running"]:
         return
@@ -600,30 +661,48 @@ def run_job(
         ok = True
         workdir = str(cwd or get_repo_root())
         for cmd in commands:
-            append_job("> " + " ".join(cmd))
-            try:
-                proc = subprocess.Popen(
-                    cmd,
-                    cwd=workdir,
-                    env=tool_env(),
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    bufsize=1,
-                )
-                assert proc.stdout is not None
-                for line in proc.stdout:
-                    append_job(line.rstrip())
-                code = proc.wait()
-                if code != 0:
+            attempts = 1 + max(0, int(retries_per_command or 0))
+            for attempt in range(1, attempts + 1):
+                if attempt > 1:
+                    append_job(f"Retrying command ({attempt}/{attempts})…")
+                append_job("> " + " ".join(cmd))
+                mark = 0
+                with _job_lock:
+                    mark = len(_job["lines"])
+                try:
+                    proc = subprocess.Popen(
+                        cmd,
+                        cwd=workdir,
+                        env=tool_env(),
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        encoding="utf-8",
+                        errors="replace",
+                        bufsize=1,
+                    )
+                    assert proc.stdout is not None
+                    for line in proc.stdout:
+                        append_job(line.rstrip())
+                    code = proc.wait()
+                    if code == 0:
+                        break
                     append_job(f"ERROR: exit code {code} ({' '.join(cmd)})")
+                    with _job_lock:
+                        chunk = list(_job["lines"][mark:])
+                    if attempt < attempts and should_retry and should_retry(chunk):
+                        append_job(
+                            "Transient build step failure detected; "
+                            "retrying the same command once more."
+                        )
+                        continue
                     ok = False
                     break
-            except Exception as e:
-                append_job(f"ERROR: {e}")
-                ok = False
+                except Exception as e:
+                    append_job(f"ERROR: {e}")
+                    ok = False
+                    break
+            if not ok:
                 break
         if ok and on_success:
             try:
@@ -827,6 +906,51 @@ def find_module_dir(game_root: Path) -> str | None:
     return None
 
 
+def copy_mingw_runtime_dlls(libs_dest: Path) -> tuple[int, list[str]]:
+    """Copy MinGW runtime DLLs into output libs/ (same toolchain that built the .prx files)."""
+    libs_dest.mkdir(parents=True, exist_ok=True)
+    copied = 0
+    missing: list[str] = []
+    for name in MINGW_RUNTIME_DLLS:
+        src = WINLIBS_BIN / name
+        if not src.is_file():
+            missing.append(name)
+            continue
+        dest = libs_dest / name
+        dest.write_bytes(src.read_bytes())
+        copied += 1
+    return copied, missing
+
+
+def copy_game_resources_to_app0(content_root: Path, app0: Path) -> tuple[int, int]:
+    """
+    Copy title resources (wads, sce_sys, media, …) into app0/.
+    Skips eboot/elf and module dirs; the relinker already places converted modules under app0.
+    """
+    app0.mkdir(parents=True, exist_ok=True)
+    file_count = 0
+    dir_count = 0
+    if not content_root.is_dir():
+        return 0, 0
+    for item in sorted(content_root.iterdir(), key=lambda p: p.name.lower()):
+        low = item.name.lower()
+        if item.is_dir():
+            if low in APP0_SKIP_DIR_NAMES:
+                continue
+            dest = app0 / item.name
+            shutil.copytree(item, dest, dirs_exist_ok=True)
+            dir_count += 1
+            file_count += sum(1 for p in dest.rglob("*") if p.is_file())
+            continue
+        if low in APP0_SKIP_FILE_NAMES or item.suffix.lower() == ".elf":
+            continue
+        if item.suffix.lower() == ".exe":
+            continue
+        shutil.copy2(item, app0 / item.name)
+        file_count += 1
+    return file_count, dir_count
+
+
 def browse_dialog(kind: str) -> str | None:
     """Open a native folder/file dialog on Windows."""
     try:
@@ -1024,10 +1148,10 @@ def api_rebuild():
     py_root = python_exe.resolve().parent.as_posix()
     preamble: list[str] = [f"Using Python for CMake: {py_cmake}"]
     if how != "direct":
-        label = "Windows short path" if how == "short-path" else "space-free junction"
+        label = "Windows short path" if how == "short-path" else "short junction"
         preamble.append(
-            f"Note: install path has spaces. Building via {label} so MinGW windres works "
-            "(your folder stays as-is):"
+            f"Note: install path is long or has spaces. Building via {label} "
+            "(MinGW windres / glslang embed). Your folder stays as-is:"
         )
         preamble.append(f"  real: {get_repo_root()}")
         preamble.append(f"  -S {src}")
@@ -1036,6 +1160,7 @@ def api_rebuild():
     def on_build_failure() -> None:
         with _job_lock:
             blob = "\n".join(_job.get("lines") or []).lower()
+            lines = list(_job.get("lines") or [])
         if "windres" in blob and ("no such file" in blob or path_has_spaces(get_repo_root())):
             append_job("")
             append_job(path_spaces_error(get_repo_root()))
@@ -1047,6 +1172,20 @@ def api_rebuild():
                 "Setup → Install / repair, or install Python from python.org with PATH enabled, "
                 "then fully quit and restart the launcher."
             )
+        if _spirv_embed_failure(lines):
+            append_job("")
+            append_job(
+                "Shader embed failed: glslang did not leave a .spv file for CMake "
+                "(often SampleDumps.spv while building libSceAgcDriver). "
+                "Python/configure already succeeded; this is usually a flaky Windows step "
+                "under a deep folder such as Downloads, or antivirus locking the output. "
+                "Try Build again. If it keeps failing, move the launcher to a short path "
+                "like C:\\AnyPS5-Launcher, then Setup/Build again."
+            )
+
+    def _retry_libs(chunk: list[str]) -> bool:
+        # Only auto-retry the libs target when SPIR-V embed flakes.
+        return _spirv_embed_failure(chunk)
 
     run_job(
         "Build",
@@ -1072,6 +1211,8 @@ def api_rebuild():
         cwd=src,
         preamble=preamble,
         on_failure=on_build_failure,
+        retries_per_command=1,
+        should_retry=_retry_libs,
     )
     return jsonify({"ok": True})
 
@@ -1196,52 +1337,92 @@ def api_input_save():
     return jsonify({"ok": True, "iniPath": str(INPUT_INI_PATH), "profile": profile})
 
 
+def _json_str(data: dict, key: str, default: str = "") -> str:
+    """Read a JSON string field; treat null/non-str as default (avoids HTTP 500 on .strip())."""
+    val = data.get(key, default)
+    if val is None:
+        return default
+    return str(val).strip().strip('"')
+
+
 @app.post("/api/convert")
 def api_convert():
     if _job["running"]:
         return jsonify({"ok": False, "error": "A job is already running."}), 409
 
-    data = request.get_json(silent=True) or {}
-    game_root = Path(data.get("gameRoot", "").strip().strip('"'))
-    output_dir = Path(data.get("outputDir", "").strip().strip('"'))
-    cfg = load_config()
+    try:
+        data = request.get_json(silent=True) or {}
+        cfg = load_config()
+        game_root = Path(_json_str(data, "gameRoot"))
+        out_raw = _json_str(data, "outputDir")
+        # Path("") becomes "." in pathlib - treat blank as default output folder.
+        output_dir = Path(out_raw) if out_raw else (game_root / "anyps5-out")
 
-    if not game_root.is_dir():
-        return jsonify({"ok": False, "error": f"Game folder not found: {game_root}"}), 400
-    if not str(output_dir):
-        output_dir = game_root / "anyps5-out"
-    output_dir.mkdir(parents=True, exist_ok=True)
+        if not str(game_root) or str(game_root) == ".":
+            return jsonify({"ok": False, "error": "Please set a game folder."}), 400
+        if not game_root.is_dir():
+            return jsonify({"ok": False, "error": f"Game folder not found: {game_root}"}), 400
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        f"Cannot create output folder {output_dir}: {e}. "
+                        "Pick a writable Output folder (or leave it empty for "
+                        f"{game_root / 'anyps5-out'})."
+                    ),
+                }
+            ), 400
 
-    if not get_relinker().is_file():
-        return jsonify({"ok": False, "error": "relinker.exe missing. Rebuild first."}), 400
-    libs = get_libs_dir()
-    if not libs.is_dir() or not list(libs.glob("*.prx")):
-        return jsonify({"ok": False, "error": "No .prx libs. Rebuild first."}), 400
+        if not get_relinker().is_file():
+            return jsonify({"ok": False, "error": "relinker.exe missing. Rebuild first."}), 400
+        libs = get_libs_dir()
+        try:
+            prx_files = list(libs.glob("*.prx")) if libs.is_dir() else []
+        except OSError as e:
+            return jsonify({"ok": False, "error": f"Cannot read libs folder {libs}: {e}"}), 400
+        if not prx_files:
+            return jsonify({"ok": False, "error": "No .prx libs. Rebuild first."}), 400
 
-    elf = find_input_elf(game_root)
-    if not elf:
-        return jsonify({"ok": False, "error": "No eboot.bin / *.elf in game folder."}), 400
-    mod = find_module_dir(game_root)
-    if not mod:
-        return jsonify(
-            {"ok": False, "error": "No sce_module / sce_modules / prx beside the ELF."}
-        ), 400
+        try:
+            elf = find_input_elf(game_root)
+            mod = find_module_dir(game_root)
+        except OSError as e:
+            return jsonify(
+                {
+                    "ok": False,
+                    "error": (
+                        f"Cannot read game folder {game_root}: {e}. "
+                        "Check the path and folder permissions."
+                    ),
+                }
+            ), 400
+        if not elf:
+            return jsonify({"ok": False, "error": "No eboot.bin / *.elf in game folder."}), 400
+        if not mod:
+            return jsonify(
+                {"ok": False, "error": "No sce_module / sce_modules / prx beside the ELF."}
+            ), 400
 
-    out_name = data.get("outputName") or cfg.get("outputName") or "app.exe"
-    if not out_name.lower().endswith(".exe"):
-        out_name += ".exe"
-    out_exe = output_dir / out_name
+        out_name = _json_str(data, "outputName") or str(cfg.get("outputName") or "app.exe")
+        if not out_name.lower().endswith(".exe"):
+            out_name += ".exe"
+        out_exe = output_dir / out_name
 
-    args = [str(get_relinker()), "--windows"]
-    if data.get("toIntel", cfg.get("toIntel")):
-        args.append("--to-intel")
-    if data.get("windowsGui", cfg.get("windowsGui")):
-        args.append("--windows-gui")
-    uf = str(data.get("unusedFilter", cfg.get("unusedFilter", "0")))
-    if uf not in ("0", "1", "2"):
-        uf = "0"
-    args.append(f"unused-filter={uf}")
-    args.extend(["--rpath", "$ORIGIN/libs", str(elf), str(out_exe)])
+        args = [str(get_relinker()), "--windows"]
+        if data.get("toIntel", cfg.get("toIntel")):
+            args.append("--to-intel")
+        if data.get("windowsGui", cfg.get("windowsGui")):
+            args.append("--windows-gui")
+        uf = str(data.get("unusedFilter", cfg.get("unusedFilter", "0")))
+        if uf not in ("0", "1", "2"):
+            uf = "0"
+        args.append(f"unused-filter={uf}")
+        args.extend(["--rpath", "$ORIGIN/libs", str(elf), str(out_exe)])
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Convert setup failed: {e}"}), 500
 
     def worker() -> None:
         set_job(True, kind="Convert", ok=None)
@@ -1277,8 +1458,32 @@ def api_convert():
                     dest = libs_dest / prx.name
                     dest.write_bytes(prx.read_bytes())
                     count += 1
-                (output_dir / "app0").mkdir(parents=True, exist_ok=True)
                 append_job(f"Copied {count} system libs to {libs_dest}")
+
+                dll_n, dll_missing = copy_mingw_runtime_dlls(libs_dest)
+                if dll_n:
+                    append_job(
+                        f"Copied {dll_n} MinGW runtime DLL(s) into {libs_dest} "
+                        f"({', '.join(MINGW_RUNTIME_DLLS)})"
+                    )
+                if dll_missing:
+                    append_job(
+                        "[WARN] Missing MinGW DLL(s) under "
+                        f"{WINLIBS_BIN}: {', '.join(dll_missing)}. "
+                        "Launch may fail with GetLastError 126 on libs\\*.prx. "
+                        "Run Setup → Install / repair (WinLibs)."
+                    )
+
+                app0 = output_dir / "app0"
+                # Relinker already writes converted modules under app0/; add title resources.
+                content_root = elf.parent
+                res_files, res_dirs = copy_game_resources_to_app0(content_root, app0)
+                append_job(
+                    f"Copied game resources into {app0} "
+                    f"({res_dirs} folder(s), {res_files} file(s); "
+                    "skipped eboot/elf and sce_module/prx)"
+                )
+
                 # Ship keyboard/mouse config next to the exe
                 dest_ini = output_dir / "anyps5-input.ini"
                 try:

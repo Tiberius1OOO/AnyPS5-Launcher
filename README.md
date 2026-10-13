@@ -41,12 +41,17 @@ On Setup: **ok** = already present, **next** = still required.
 ## Convert notes
 
 - Game folder needs `eboot.bin` or another `.elf`, plus modules such as `sce_module`.
+- After convert, the launcher copies system `.prx` libs, the three MinGW runtime DLLs
+  (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`) into `libs/`, and
+  title resources (`wads`, `sce_sys`, …) into `app0/` (module dirs stay with the relinker).
 - Use the **?** tips on Convert options for GPU filter, Intel CPU, and cleanup level.
 
-## Paths with spaces
+## Paths with spaces or deep folders
 
 Folder names with spaces (example: `C:\Games\HYDERA LUNCHER\...`) are supported.  
-During Build the launcher automatically uses a space-free Windows short path or a junction under `ProgramData`, because MinGW `windres` cannot parse spaced include paths. Your install folder does not need to move.
+Deep installs under `Downloads\...` are also remapped. During Build the launcher uses a
+short Windows path or a junction under `ProgramData` so MinGW `windres` and glslang
+SPIR-V embed steps stay reliable. Your install folder does not need to move.
 
 ## Python and Build
 
