@@ -370,56 +370,51 @@
     if (btnKeep) btnKeep.disabled = true;
     const status = $("launcherUpdateStatus");
     if (status) {
-      status.textContent = "Downloading ~20 MB from GitHub… please wait (do not close the launcher).";
+      status.textContent = "Starting download… watch the launcher console and the Updater window.";
     }
     setBusy(true);
 
-    // Poll download/extract phase while the long POST runs
     let poll = null;
-    const tick = async () => {
-      try {
-        const st = await api("/api/launcher/update-check");
-        if (!status || !st) return;
-        if (st.phase === "downloading") {
-          const pct = (st.downloadPercent != null) ? ` ${Math.round(st.downloadPercent)}%` : "";
-          status.textContent = `Downloading update${pct}… please wait.`;
-        } else if (st.phase === "extracting") {
-          status.textContent = "Extracting update…";
-        } else if (st.phase === "restarting") {
-          status.textContent = "Restarting launcher…";
-        }
-      } catch (_) {}
-    };
-    poll = window.setInterval(tick, 500);
-
-    try {
-      const ctrl = new AbortController();
-      const kill = window.setTimeout(() => ctrl.abort(), 10 * 60 * 1000);
-      const data = await api("/api/launcher/update", {
-        method: "POST",
-        body: "{}",
-        signal: ctrl.signal,
-      });
-      window.clearTimeout(kill);
-      if (status) {
-        status.textContent = data.toVersion
-          ? `Installing v${data.toVersion} and restarting…`
-          : "Installing and restarting…";
-      }
-      toast("Updating launcher…", "ok");
-      // Process exits; updater script replaces files and starts the new exe.
-    } catch (e) {
+    const finishFail = (msg) => {
+      if (poll) window.clearInterval(poll);
       launcherUpdateBusy = false;
       if (btnNow) btnNow.disabled = false;
       if (btnKeep) btnKeep.disabled = false;
-      if (status) status.textContent = "";
+      if (status) status.textContent = msg || "";
       setBusy(false);
-      const msg = (e && e.name === "AbortError")
-        ? "Update timed out. Check your network and try again."
-        : (e.message || "Update failed");
-      toast(msg, "error");
-    } finally {
-      if (poll) window.clearInterval(poll);
+      toast(msg || "Update failed", "error");
+    };
+
+    const tick = async () => {
+      try {
+        const st = await api("/api/launcher/update-check?force=0");
+        if (!st) return;
+        if (status) {
+          if (st.phase === "downloading") {
+            const pct = (st.downloadPercent != null) ? ` ${Math.round(st.downloadPercent)}%` : "";
+            status.textContent = `Downloading update${pct}… see console for details.`;
+          } else if (st.phase === "extracting") {
+            status.textContent = "Extracting update…";
+          } else if (st.phase === "restarting") {
+            status.textContent = "Updater window opened — replacing files and relaunching…";
+          } else if (st.phase === "failed") {
+            finishFail(st.error || "Update failed — see launcher console.");
+            return;
+          }
+        }
+        if (st.phase === "restarting") {
+          toast("Updater running — launcher will restart", "ok");
+        }
+      } catch (_) {}
+    };
+    poll = window.setInterval(tick, 400);
+
+    try {
+      // Returns immediately; work continues in a background thread + updater console
+      await api("/api/launcher/update", { method: "POST", body: "{}" });
+      await tick();
+    } catch (e) {
+      finishFail(e.message || "Update failed");
     }
   }
 

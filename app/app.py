@@ -1256,23 +1256,19 @@ def api_launcher_update_check():
 
 @app.post("/api/launcher/update")
 def api_launcher_update():
-    """Download the latest release zip, replace files, and restart the exe."""
-    from self_update import apply_update
+    """Start self-update in a background thread; UI polls phase until restart/fail."""
+    from self_update import get_state, start_update_async
 
+    state = get_state()
+    if state.get("updating"):
+        return jsonify({"ok": False, "error": "Update already in progress", **state}), 409
     try:
-        result = apply_update()
+        print("[update] Update Now clicked — starting background download", flush=True)
+        result = start_update_async()
+        return jsonify(result)
     except Exception as e:
+        print(f"[update] failed to start: {e}", flush=True)
         return jsonify({"ok": False, "error": str(e)}), 400
-
-    def _exit_soon() -> None:
-        # Give Waitress time to flush the JSON response before hard-exit
-        import time
-
-        time.sleep(0.6)
-        os._exit(0)
-
-    threading.Thread(target=_exit_soon, daemon=True).start()
-    return jsonify(result)
 
 
 @app.post("/api/open-github")
@@ -2052,8 +2048,14 @@ def main() -> None:
     port = int(os.environ.get("ANYPS5_LAUNCHER_PORT", "8765"))
     # ?boot=1 triggers the logo intro once; F5 uses a clean URL without it
     url = f"http://127.0.0.1:{port}/?boot=1"
-    print(f"AnyPS5 Launcher v{LAUNCHER_VERSION}: http://127.0.0.1:{port}/")
-    print("Leave this window open. Press Ctrl+C to quit.")
+    try:
+        sys.stdout.reconfigure(line_buffering=True)  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    print(f"AnyPS5 Launcher v{LAUNCHER_VERSION}  pid={os.getpid()}", flush=True)
+    print(f"UI: http://127.0.0.1:{port}/", flush=True)
+    print("Leave this window open. Press Ctrl+C to quit.", flush=True)
+    print("Update progress is printed here when you click Update Now.", flush=True)
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     # Waitress: local UI server without Flask's "development server" warning
     import logging
