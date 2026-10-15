@@ -353,24 +353,57 @@
     const btnKeep = $("btnLauncherKeepOld");
     if (btnKeep) btnKeep.disabled = true;
     const status = $("launcherUpdateStatus");
-    if (status) status.textContent = "Downloading update… the launcher will restart when done.";
+    if (status) {
+      status.textContent = "Downloading ~20 MB from GitHub… please wait (do not close the launcher).";
+    }
     setBusy(true);
+
+    // Poll download/extract phase while the long POST runs
+    let poll = null;
+    const tick = async () => {
+      try {
+        const st = await api("/api/launcher/update-check");
+        if (!status || !st) return;
+        if (st.phase === "downloading") {
+          const pct = (st.downloadPercent != null) ? ` ${Math.round(st.downloadPercent)}%` : "";
+          status.textContent = `Downloading update${pct}… please wait.`;
+        } else if (st.phase === "extracting") {
+          status.textContent = "Extracting update…";
+        } else if (st.phase === "restarting") {
+          status.textContent = "Restarting launcher…";
+        }
+      } catch (_) {}
+    };
+    poll = window.setInterval(tick, 500);
+
     try {
-      const data = await api("/api/launcher/update", { method: "POST", body: "{}" });
+      const ctrl = new AbortController();
+      const kill = window.setTimeout(() => ctrl.abort(), 10 * 60 * 1000);
+      const data = await api("/api/launcher/update", {
+        method: "POST",
+        body: "{}",
+        signal: ctrl.signal,
+      });
+      window.clearTimeout(kill);
       if (status) {
         status.textContent = data.toVersion
           ? `Installing v${data.toVersion} and restarting…`
           : "Installing and restarting…";
       }
       toast("Updating launcher…", "ok");
-      // Process exits; new instance opens the browser again.
+      // Process exits; updater script replaces files and starts the new exe.
     } catch (e) {
       launcherUpdateBusy = false;
       if (btnNow) btnNow.disabled = false;
       if (btnKeep) btnKeep.disabled = false;
       if (status) status.textContent = "";
       setBusy(false);
-      toast(e.message || "Update failed", "error");
+      const msg = (e && e.name === "AbortError")
+        ? "Update timed out. Check your network and try again."
+        : (e.message || "Update failed");
+      toast(msg, "error");
+    } finally {
+      if (poll) window.clearInterval(poll);
     }
   }
 

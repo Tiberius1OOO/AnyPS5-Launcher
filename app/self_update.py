@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -47,6 +48,8 @@ _state: dict[str, Any] = {
     "error": None,
     "canAutoUpdate": False,
     "updating": False,
+    "phase": None,  # checking | downloading | extracting | restarting
+    "downloadPercent": None,
 }
 
 
@@ -83,6 +86,12 @@ def get_state() -> dict[str, Any]:
         return out
 
 
+def _set_phase(phase: str | None, *, percent: float | None = None) -> None:
+    with _lock:
+        _state["phase"] = phase
+        _state["downloadPercent"] = percent
+
+
 def _http_json(url: str, timeout: float = 20.0) -> dict:
     req = urllib.request.Request(
         url,
@@ -104,9 +113,9 @@ def check_for_update(*, force: bool = False) -> dict[str, Any]:
         if _state["updating"]:
             return get_state()
 
-    error: str | None = None
     latest = None
     try:
+        _set_phase("checking")
         data = _http_json(LAUNCHER_RELEASES_API)
         tag = str(data.get("tag_name") or "")
         latest = tag.lstrip("vV") or tag
@@ -138,6 +147,8 @@ def check_for_update(*, force: bool = False) -> dict[str, Any]:
                     "assetName": asset_name,
                     "error": None if download_url or not available else "No zip asset on latest release",
                     "canAutoUpdate": can_auto_update(),
+                    "phase": None,
+                    "downloadPercent": None,
                 }
             )
             if not download_url and is_newer(latest, LAUNCHER_VERSION):
@@ -145,7 +156,6 @@ def check_for_update(*, force: bool = False) -> dict[str, Any]:
                 _state["error"] = "Update found but zip asset is missing on GitHub"
                 _state["canAutoUpdate"] = False
     except Exception as e:
-        error = str(e)
         with _lock:
             _state.update(
                 {
@@ -153,8 +163,10 @@ def check_for_update(*, force: bool = False) -> dict[str, Any]:
                     "updateAvailable": False,
                     "currentVersion": LAUNCHER_VERSION,
                     "latestVersion": latest,
-                    "error": error,
+                    "error": str(e),
                     "canAutoUpdate": can_auto_update(),
+                    "phase": None,
+                    "downloadPercent": None,
                 }
             )
     return get_state()
@@ -179,45 +191,99 @@ def _download(url: str, dest: Path) -> None:
         url,
         headers={"User-Agent": f"AnyPS5-Launcher/{LAUNCHER_VERSION}"},
     )
-    with urllib.request.urlopen(req, timeout=180) as resp, open(dest, "wb") as out:
-        shutil.copyfileobj(resp, out, length=1024 * 256)
+    with urllib.request.urlopen(req, timeout=300) as resp, open(dest, "wb") as out:
+        total = int(resp.headers.get("Content-Length") or 0)
+        got = 0
+        last_pct = -1
+        while True:
+            chunk = resp.read(256 * 1024)
+            if not chunk:
+                break
+            out.write(chunk)
+            got += len(chunk)
+            if total > 0:
+                pct = int(100 * got / total)
+                if pct != last_pct:
+                    last_pct = pct
+                    _set_phase("downloading", percent=float(pct))
+            else:
+                _set_phase("downloading", percent=None)
+    _set_phase("downloading", percent=100.0)
 
 
-def _write_updater_script(target: Path, source: Path, exe_name: str = "AnyPS5Launcher.exe") -> Path:
-    """Write a .cmd that waits for this process to exit, copies files, restarts."""
+def _write_updater_script(
+    target: Path,
+    source: Path,
+    *,
+    exe_name: str = "AnyPS5Launcher.exe",
+    pid: int,
+) -> Path:
+    """
+    Write a .cmd that waits for *this* PID to exit, copies files, restarts.
+
+    Important: do NOT use `timeout` here. Detached/no-console cmd sessions often hang
+    forever on `timeout /t`. Use ping-delay and wait on the specific PID instead of
+    every process named AnyPS5Launcher.exe (which can also deadlock on restart).
+    """
     script = Path(tempfile.gettempdir()) / "anyps5-launcher-apply-update.cmd"
-    # Use delayed expansion carefully; keep paths quoted.
+    log = Path(tempfile.gettempdir()) / "anyps5-launcher-update.log"
     preserve_dirs = " ".join(PRESERVE_DIR_NAMES)
     preserve_files = " ".join(PRESERVE_FILE_NAMES)
+    # Escape for cmd set "VAR=..." — paths must not contain unescaped quotes
+    target_s = str(target)
+    source_s = str(source)
+    log_s = str(log)
     content = f"""@echo off
-setlocal EnableExtensions
-set "TARGET={target}"
-set "SOURCE={source}"
+setlocal EnableExtensions EnableDelayedExpansion
+set "TARGET={target_s}"
+set "SOURCE={source_s}"
 set "EXE={exe_name}"
-echo AnyPS5 Launcher updater
-echo Waiting for launcher to exit...
+set "WAITPID={pid}"
+set "LOG={log_s}"
+echo [%DATE% %TIME%] updater start PID=!WAITPID! > "!LOG!"
+echo TARGET=!TARGET!>> "!LOG!"
+echo SOURCE=!SOURCE!>> "!LOG!"
+
+set /a WAITCOUNT=0
 :wait
-timeout /t 1 /nobreak >nul
-tasklist /FI "IMAGENAME eq %EXE%" 2>nul | find /I "%EXE%" >nul
-if not errorlevel 1 goto wait
+set /a WAITCOUNT+=1
+if !WAITCOUNT! GEQ 90 goto apply_anyway
+rem ping delay ~1s. Do not use the Windows timeout command - it hangs with no console.
+ping -n 2 127.0.0.1 >nul
+tasklist /FI "PID eq !WAITPID!" /NH 2>nul | find "!WAITPID!" >nul
+if errorlevel 1 goto exited
+echo [%DATE% %TIME%] still running PID !WAITPID! n=!WAITCOUNT!>> "!LOG!"
+goto wait
 
-echo Applying update files...
-robocopy "%SOURCE%" "%TARGET%" /E /NFL /NDL /NJH /NJS /nc /ns /np /XD {preserve_dirs} /XF {preserve_files}
-set "RC=%ERRORLEVEL%"
-if %RC% GEQ 8 (
-  echo [ERROR] robocopy failed with code %RC%
-  pause
-  exit /b %RC%
-)
+:apply_anyway
+echo [%DATE% %TIME%] wait expired n=!WAITCOUNT! - applying anyway>> "!LOG!"
+goto apply
 
-echo Starting new launcher...
-start "" "%TARGET%\\%EXE%"
-timeout /t 2 /nobreak >nul
-rmdir /s /q "%SOURCE%" 2>nul
+:exited
+echo [%DATE% %TIME%] PID !WAITPID! exited>> "!LOG!"
+
+:apply
+echo [%DATE% %TIME%] robocopy start>> "!LOG!"
+rem /IS /IT force overwrite even when size/time look identical
+robocopy "!SOURCE!" "!TARGET!" /E /IS /IT /R:3 /W:1 /NFL /NDL /NJH /NJS /nc /ns /np /XD {preserve_dirs} /XF {preserve_files} >> "!LOG!" 2>&1
+set RC=!ERRORLEVEL!
+echo [%DATE% %TIME%] robocopy exit=!RC!>> "!LOG!"
+if !RC! GEQ 8 goto robofail
+
+echo [%DATE% %TIME%] starting "!TARGET!\\!EXE!">> "!LOG!"
+start "" "!TARGET!\\!EXE!"
+ping -n 3 127.0.0.1 >nul
+rmdir /s /q "!SOURCE!" 2>nul
+echo [%DATE% %TIME%] done>> "!LOG!"
 del /f /q "%~f0" 2>nul
 exit /b 0
+rem always success if we got this far; start.exe failure must not fail the updater
+
+:robofail
+echo [%DATE% %TIME%] robocopy FAILED rc=!RC!>> "!LOG!"
+exit /b !RC!
 """
-    script.write_text(content, encoding="utf-8")
+    script.write_text(content, encoding="utf-8", errors="replace")
     return script
 
 
@@ -243,12 +309,13 @@ def apply_update() -> dict[str, Any]:
     zip_path = work / LAUNCHER_ZIP_NAME
     extract_dir = work / "extract"
     try:
+        _set_phase("downloading", percent=0.0)
         _download(str(url), zip_path)
+        _set_phase("extracting")
         extract_dir.mkdir(parents=True, exist_ok=True)
         with zipfile.ZipFile(zip_path, "r") as zf:
             zf.extractall(extract_dir)
         payload = _find_payload_dir(extract_dir)
-        # Stage a clean copy so the updater can delete the temp tree afterward
         staged = work / "staged"
         if staged.exists():
             shutil.rmtree(staged, ignore_errors=True)
@@ -258,11 +325,15 @@ def apply_update() -> dict[str, Any]:
             ignore=shutil.ignore_patterns(*PRESERVE_DIR_NAMES, *PRESERVE_FILE_NAMES),
         )
         target = install_root()
-        script = _write_updater_script(target, staged)
-        # Detached so this process can exit while the script keeps running
+        script = _write_updater_script(target, staged, pid=os.getpid())
+        _set_phase("restarting")
+
+        # CREATE_NO_WINDOW: keep cmd alive without a console flash.
+        # Do NOT use DETACHED_PROCESS — it breaks ping/tasklist wait loops on some PCs.
         creationflags = 0
         if sys.platform == "win32":
-            creationflags = subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+            creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
+
         subprocess.Popen(
             ["cmd.exe", "/c", str(script)],
             cwd=str(Path(tempfile.gettempdir())),
@@ -272,15 +343,20 @@ def apply_update() -> dict[str, Any]:
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
+        # Brief pause so the child is scheduled before we exit
+        time.sleep(0.35)
         return {
             "ok": True,
             "restarting": True,
             "fromVersion": LAUNCHER_VERSION,
             "toVersion": state.get("latestVersion"),
             "target": str(target),
+            "logFile": str(Path(tempfile.gettempdir()) / "anyps5-launcher-update.log"),
         }
     except Exception:
         with _lock:
             _state["updating"] = False
+            _state["phase"] = None
+            _state["downloadPercent"] = None
         shutil.rmtree(work, ignore_errors=True)
         raise
