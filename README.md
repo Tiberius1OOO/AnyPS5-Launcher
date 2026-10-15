@@ -46,8 +46,10 @@ On Setup: **ok** = already present, **next** = still required.
 
 - Game folder needs `eboot.bin` or another `.elf`, plus modules such as `sce_module`.
 - After convert, the launcher copies system `.prx` libs, the three MinGW runtime DLLs
-  (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`) into `libs/`, and
-  title resources (`wads`, `sce_sys`, …) into `app0/` (module dirs stay with the relinker).
+  (`libgcc_s_seh-1.dll`, `libstdc++-6.dll`, `libwinpthread-1.dll`) into `libs/`, next to
+  the `.exe`, and into `app0/sce_module*` (Windows does not search PATH for these; missing
+  DLLs cause GetLastError 126). Title resources go into `app0/`. **Start game** also
+  re-copies the MinGW DLLs if an older convert is missing them.
 - Use the **?** tips on Convert options for GPU filter, Intel CPU, and cleanup level.
 
 ## Paths with spaces or deep folders

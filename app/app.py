@@ -93,7 +93,9 @@ SSL_CERT = Path(r"C:\Program Files\Git\mingw64\etc\ssl\certs\ca-bundle.crt")
 GITHUB_URL = "https://github.com/boykopovar/AnyPS5"
 GITHUB_README_RAW = "https://raw.githubusercontent.com/boykopovar/AnyPS5/main/README.md"
 
-# Required next to Windows .prx system libs (load fails with error 126 without them).
+# Required next to Windows .prx (and often next to the .exe). LoadLibraryEx uses
+# LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | DEFAULT_DIRS — not PATH — so a system-wide
+# MinGW install is ignored. Missing these → GetLastError 126.
 MINGW_RUNTIME_DLLS = (
     "libgcc_s_seh-1.dll",
     "libstdc++-6.dll",
@@ -911,20 +913,152 @@ def find_module_dir(game_root: Path) -> str | None:
     return None
 
 
-def copy_mingw_runtime_dlls(libs_dest: Path) -> tuple[int, list[str]]:
-    """Copy MinGW runtime DLLs into output libs/ (same toolchain that built the .prx files)."""
-    libs_dest.mkdir(parents=True, exist_ok=True)
-    copied = 0
-    missing: list[str] = []
-    for name in MINGW_RUNTIME_DLLS:
-        src = WINLIBS_BIN / name
-        if not src.is_file():
-            missing.append(name)
+def find_mingw_runtime_sources() -> dict[str, Path]:
+    """Locate each MinGW runtime DLL from WinLibs, the build libs folder, or gcc on PATH."""
+    found: dict[str, Path] = {}
+    search_dirs: list[Path] = []
+
+    # Prefer the folder that actually holds the built .prx (may already have runtimes)
+    try:
+        libs = get_libs_dir()
+        if libs.is_dir():
+            search_dirs.append(libs)
+    except Exception:
+        pass
+
+    search_dirs.append(WINLIBS_BIN)
+
+    # gcc.exe directory from PATH / common WinLibs layouts
+    for cand in (
+        shutil.which("gcc"),
+        shutil.which("g++"),
+    ):
+        if cand:
+            search_dirs.append(Path(cand).resolve().parent)
+
+    for extra in (
+        Path(r"C:\winlibs\mingw64\bin"),
+        Path(r"C:\mingw64\bin"),
+        Path(os.environ.get("WINLIBS_BIN", "")),
+    ):
+        if extra and str(extra) not in ("", "."):
+            search_dirs.append(extra)
+
+    # Deduplicate while preserving order
+    seen: set[str] = set()
+    ordered: list[Path] = []
+    for d in search_dirs:
+        try:
+            key = str(d.resolve()).lower()
+        except Exception:
+            key = str(d).lower()
+        if key in seen:
             continue
-        dest = libs_dest / name
-        dest.write_bytes(src.read_bytes())
-        copied += 1
-    return copied, missing
+        seen.add(key)
+        ordered.append(d)
+
+    for name in MINGW_RUNTIME_DLLS:
+        for d in ordered:
+            src = d / name
+            if src.is_file():
+                found[name] = src
+                break
+    return found
+
+
+def _copy_file_bytes(src: Path, dest: Path) -> bool:
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        data = src.read_bytes()
+        if dest.is_file() and dest.stat().st_size == len(data):
+            # Same size — still overwrite to avoid stale partial copies
+            pass
+        dest.write_bytes(data)
+        return True
+    except OSError:
+        return False
+
+
+def mingw_destinations_for_output(output_dir: Path) -> list[Path]:
+    """
+    Folders that must contain the MinGW runtimes for LoadLibraryEx to succeed.
+    - libs/: system .prx and any title libs loaded via $ORIGIN/libs
+    - output_dir/: application directory (DEFAULT_DIRS)
+    - app0/sce_module* / prx: converted guest modules load from here
+    """
+    dests: list[Path] = [output_dir / "libs", output_dir]
+    app0 = output_dir / "app0"
+    if app0.is_dir():
+        for name in ("sce_module", "sce_modules", "prx"):
+            d = app0 / name
+            if d.is_dir():
+                dests.append(d)
+        # Nested module dirs (rare layouts)
+        for child in app0.iterdir():
+            if child.is_dir() and child.name.lower() in ("sce_module", "sce_modules", "prx"):
+                if child not in dests:
+                    dests.append(child)
+    # Dedupe
+    out: list[Path] = []
+    seen: set[str] = set()
+    for d in dests:
+        try:
+            key = str(d.resolve()).lower()
+        except Exception:
+            key = str(d).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(d)
+    return out
+
+
+def copy_mingw_runtime_dlls(*dest_dirs: Path) -> tuple[int, list[str], list[str]]:
+    """
+    Copy MinGW runtime DLLs into each destination directory.
+    Returns (files_written, missing_names, source_dirs_used).
+    """
+    sources = find_mingw_runtime_sources()
+    missing = [n for n in MINGW_RUNTIME_DLLS if n not in sources]
+    written = 0
+    used: list[str] = []
+    for dest_dir in dest_dirs:
+        if dest_dir is None:
+            continue
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        for name, src in sources.items():
+            if _copy_file_bytes(src, dest_dir / name):
+                written += 1
+                src_dir = str(src.parent)
+                if src_dir not in used:
+                    used.append(src_dir)
+    return written, missing, used
+
+
+def verify_mingw_in_libs(libs_dest: Path) -> list[str]:
+    """Return names of MinGW DLLs still missing from libs/."""
+    return [n for n in MINGW_RUNTIME_DLLS if not (libs_dest / n).is_file()]
+
+
+def ensure_mingw_runtime_for_output(output_dir: Path) -> tuple[bool, str]:
+    """
+    Make sure MinGW runtimes exist beside the converted game (repair/start path).
+    Returns (ok, detail_message).
+    """
+    output_dir = Path(output_dir)
+    libs = output_dir / "libs"
+    dests = mingw_destinations_for_output(output_dir)
+    written, missing, used = copy_mingw_runtime_dlls(*dests)
+    still = verify_mingw_in_libs(libs)
+    if still:
+        return (
+            False,
+            f"Missing MinGW DLL(s) in {libs}: {', '.join(still)}. "
+            f"Install WinLibs (Setup) so these exist under {WINLIBS_BIN}.",
+        )
+    where = ", ".join(str(d) for d in dests)
+    src = used[0] if used else str(WINLIBS_BIN)
+    return True, f"MinGW runtimes OK in [{where}] (from {src}; wrote {written} file(s))"
 
 
 def copy_game_resources_to_app0(content_root: Path, app0: Path) -> tuple[int, int]:
@@ -1512,21 +1646,7 @@ def api_convert():
                     dest = libs_dest / prx.name
                     dest.write_bytes(prx.read_bytes())
                     count += 1
-                append_job(f"Copied {count} system libs to {libs_dest}")
-
-                dll_n, dll_missing = copy_mingw_runtime_dlls(libs_dest)
-                if dll_n:
-                    append_job(
-                        f"Copied {dll_n} MinGW runtime DLL(s) into {libs_dest} "
-                        f"({', '.join(MINGW_RUNTIME_DLLS)})"
-                    )
-                if dll_missing:
-                    append_job(
-                        "[WARN] Missing MinGW DLL(s) under "
-                        f"{WINLIBS_BIN}: {', '.join(dll_missing)}. "
-                        "Launch may fail with GetLastError 126 on libs\\*.prx. "
-                        "Run Setup → Install / repair (WinLibs)."
-                    )
+                append_job(f"Copied {count} system libs (.prx) to {libs_dest}")
 
                 app0 = output_dir / "app0"
                 # Relinker already writes converted modules under app0/; add title resources.
@@ -1537,6 +1657,29 @@ def api_convert():
                     f"({res_dirs} folder(s), {res_files} file(s); "
                     "skipped eboot/elf and sce_module/prx)"
                 )
+
+                # MinGW runtimes: must sit next to every loaded .prx (libs/ and
+                # app0 guest modules) and in the exe directory. Windows does not
+                # search PATH for these (see AnyPS5 docs — error 126 otherwise).
+                dests = mingw_destinations_for_output(output_dir)
+                dll_n, dll_missing, dll_srcs = copy_mingw_runtime_dlls(*dests)
+                if dll_n:
+                    append_job(
+                        f"Copied MinGW runtime DLL(s) ×{dll_n} into "
+                        f"{', '.join(str(d) for d in dests)} "
+                        f"({', '.join(MINGW_RUNTIME_DLLS)}; from {dll_srcs[0] if dll_srcs else '?'})"
+                    )
+                still_missing = verify_mingw_in_libs(libs_dest)
+                if still_missing or dll_missing:
+                    ok = False
+                    append_job(
+                        "[ABBRUCH] Missing MinGW DLL(s): "
+                        f"{', '.join(still_missing or dll_missing)}. "
+                        f"Looked under {WINLIBS_BIN} and gcc on PATH. "
+                        "Run Setup → Install / repair (WinLibs), then Convert again. "
+                        "Without these, launch fails with GetLastError 126 "
+                        "(e.g. Failed to load module: libs\\*.prx)."
+                    )
 
                 # Ship keyboard/mouse config next to the exe
                 dest_ini = output_dir / "anyps5-input.ini"
@@ -1582,12 +1725,16 @@ def api_start():
     exe = Path(cfg.get("lastOutputExe") or "")
     if not exe.is_file():
         return jsonify({"ok": False, "error": "No converted .exe yet. Convert first."}), 400
+    # Repair MinGW runtimes before launch (older converts often lack them → error 126)
+    mingw_ok, mingw_detail = ensure_mingw_runtime_for_output(exe.parent)
+    if not mingw_ok:
+        return jsonify({"ok": False, "error": mingw_detail}), 400
     env = tool_env()
     if cfg.get("gpuFilter"):
         env["ANYPS5_GPU"] = str(cfg["gpuFilter"])
     try:
         subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env)
-        return jsonify({"ok": True, "exe": str(exe)})
+        return jsonify({"ok": True, "exe": str(exe), "mingw": mingw_detail})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
 
