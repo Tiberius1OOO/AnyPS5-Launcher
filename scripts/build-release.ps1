@@ -39,7 +39,15 @@ $releaseDir = Join-Path $distDir "release"
 $outName = "AnyPS5-Launcher"
 $stage = Join-Path $releaseDir $outName
 
-if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+if (Test-Path $stage) {
+    try {
+        Remove-Item -Recurse -Force $stage -ErrorAction Stop
+    } catch {
+        $bak = "$stage.old-$(Get-Date -Format yyyyMMddHHmmss)"
+        Write-Host "Stage locked; moving aside to $bak" -ForegroundColor Yellow
+        Move-Item -LiteralPath $stage -Destination $bak -Force
+    }
+}
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 $ico = Join-Path $Root "app\static\img\app-icon.ico"
