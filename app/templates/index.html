@@ -9,7 +9,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/launcher.css?v=20" />
+  <link rel="stylesheet" href="/static/css/launcher.css?v=22" />
 </head>
 <body class="boot-pending">
   <div class="bg" aria-hidden="true"></div>
@@ -24,7 +24,7 @@
       <div class="hero-copy">
         <div class="brand-row">
           <div class="brand-dock" id="brandDock">
-            <img id="brandLogo" class="brand-logo" src="/static/img/brand-logo.png" alt="Logo" />
+            <img id="brandLogo" class="brand-logo" src="/static/img/brand-logo.png" alt="AnyPS5 Launcher on GitHub" title="Open launcher GitHub" role="link" tabindex="0" />
           </div>
           <div>
             <p class="eyebrow">AnyPS5</p>
@@ -301,7 +301,7 @@
 
     <footer class="foot">
       <span id="jobStatus">Ready</span>
-      <span class="mono" id="launcherVerLabel">Launcher …</span>
+      <span class="mono linkish" id="launcherVerLabel" role="link" tabindex="0" title="Open launcher GitHub">Launcher …</span>
       <span class="mono" id="repoPath"></span>
     </footer>
   </div>
@@ -330,8 +330,8 @@
     </div>
   </div>
 
-  <div class="modal-backdrop" id="launcherUpdateModal" hidden>
-    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle">
+  <div class="modal-backdrop update-modal" id="launcherUpdateModal" hidden>
+    <div class="modal update-modal-card" role="dialog" aria-modal="true" aria-labelledby="launcherUpdateTitle">
       <h3 id="launcherUpdateTitle">Launcher update available</h3>
       <p id="launcherUpdateBody">
         A newer AnyPS5 Launcher is on GitHub.
@@ -346,6 +346,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
-  <script src="/static/js/launcher.js?v=21"></script>
+  <script src="/static/js/launcher.js?v=22"></script>
 </body>
 </html>

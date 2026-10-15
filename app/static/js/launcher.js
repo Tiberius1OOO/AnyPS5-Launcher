@@ -1,10 +1,12 @@
 (() => {
   const $ = (id) => document.getElementById(id);
   const GITHUB_FALLBACK = "https://github.com/boykopovar/AnyPS5";
+  const LAUNCHER_GITHUB_FALLBACK = "https://github.com/Tiberius1OOO/AnyPS5-Launcher";
   let lastLineCount = 0;
   let pollTimer = null;
   let progressTimer = null;
   let githubUrl = GITHUB_FALLBACK;
+  let launcherGithubUrl = LAUNCHER_GITHUB_FALLBACK;
   let readmeLoaded = false;
   let inputProfile = { bindings: {} };
   let selectedAction = "Cross";
@@ -15,6 +17,7 @@
   let lastSetupAudit = null;
   let launcherUpdatePrompted = false; // once per page/runtime
   let launcherUpdateBusy = false;
+  let launcherUpdateResolve = null; // unblock boot after Update / Keep
 
   function toast(msg, kind = "") {
     const el = $("toast");
@@ -206,6 +209,7 @@
     const g = data.git || {};
     const b = data.build || {};
     if (data.githubUrl) githubUrl = data.githubUrl;
+    if (data.launcherGithubUrl) launcherGithubUrl = data.launcherGithubUrl;
     $("statBranch").textContent = g.branch || "-";
     $("statHead").textContent = g.head || "-";
     $("repoPath").textContent = data.repoRoot || "";
@@ -241,6 +245,7 @@
     if ($("launcherVerLabel")) {
       const ver = data.launcherVersion || (data.launcherUpdate && data.launcherUpdate.currentVersion) || "?";
       $("launcherVerLabel").textContent = `Launcher v${ver}`;
+      $("launcherVerLabel").title = "Open launcher GitHub";
     }
 
     if ($("buildSyncLabel")) $("buildSyncLabel").textContent = b.syncLabel || "";
@@ -284,7 +289,7 @@
 
   function openLauncherUpdateModal(info) {
     const modal = $("launcherUpdateModal");
-    if (!modal) return;
+    if (!modal) return Promise.resolve();
     const cur = info.currentVersion || "?";
     const latest = info.latestVersion || info.tagName || "?";
     const body = $("launcherUpdateBody");
@@ -306,7 +311,7 @@
       }
     }
     const status = $("launcherUpdateStatus");
-    if (status) status.textContent = "";
+    if (status) status.textContent = "Choose Update Now or Keep using Old version to continue.";
     const btnNow = $("btnLauncherUpdateNow");
     if (btnNow) {
       btnNow.disabled = false;
@@ -316,12 +321,23 @@
     }
     const btnKeep = $("btnLauncherKeepOld");
     if (btnKeep) btnKeep.disabled = false;
+    document.body.classList.add("update-gate");
     modal.hidden = false;
+    // Force a decision before the rest of the UI continues
+    return new Promise((resolve) => {
+      launcherUpdateResolve = resolve;
+    });
   }
 
   function closeLauncherUpdateModal() {
     const modal = $("launcherUpdateModal");
     if (modal) modal.hidden = true;
+    document.body.classList.remove("update-gate");
+    if (launcherUpdateResolve) {
+      const done = launcherUpdateResolve;
+      launcherUpdateResolve = null;
+      done();
+    }
   }
 
   async function checkLauncherUpdateOnce() {
@@ -330,7 +346,7 @@
     try {
       const data = await api("/api/launcher/update-check");
       if (data && data.updateAvailable) {
-        openLauncherUpdateModal(data);
+        await openLauncherUpdateModal(data);
       }
     } catch (_) {
       // Silent: offline / rate limit should not block the UI
@@ -519,13 +535,13 @@
     }
   }
 
-  async function openGithub() {
-    try {
-      const data = await api("/api/open-github", { method: "POST", body: "{}" });
-      window.open(data.url || githubUrl, "_blank", "noopener,noreferrer");
-    } catch {
-      window.open(githubUrl, "_blank", "noopener,noreferrer");
-    }
+  function openGithub() {
+    // Open once in the browser tab — server must not also call webbrowser.open
+    window.open(githubUrl || GITHUB_FALLBACK, "_blank", "noopener,noreferrer");
+  }
+
+  function openLauncherGithub() {
+    window.open(launcherGithubUrl || LAUNCHER_GITHUB_FALLBACK, "_blank", "noopener,noreferrer");
   }
 
   function renderSetupList(audit) {
@@ -849,6 +865,20 @@
   on("btnFetch", "click", () => updateCheck().catch((e) => toast(e.message, "error")));
   on("btnOpenGithub", "click", () => openGithub());
   on("btnOpenGithubReadme", "click", () => openGithub());
+  on("brandLogo", "click", () => openLauncherGithub());
+  on("brandLogo", "keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      openLauncherGithub();
+    }
+  });
+  on("launcherVerLabel", "click", () => openLauncherGithub());
+  on("launcherVerLabel", "keydown", (ev) => {
+    if (ev.key === "Enter" || ev.key === " ") {
+      ev.preventDefault();
+      openLauncherGithub();
+    }
+  });
   on("btnReloadReadme", "click", () => loadReadme(true));
   on("btnPull", "click", () =>
     beginJob("Starting GitHub update...", () => api("/api/update", { method: "POST", body: "{}" }))
@@ -914,8 +944,19 @@
   on("btnLauncherKeepOld", "click", () => closeLauncherUpdateModal());
   on("launcherUpdateModal", "click", (ev) => {
     // Do not dismiss by backdrop click — user must choose Update or Keep
-    if (ev.target === $("launcherUpdateModal")) ev.stopPropagation();
+    if (ev.target === $("launcherUpdateModal")) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
   });
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key !== "Escape") return;
+    const modal = $("launcherUpdateModal");
+    if (modal && !modal.hidden) {
+      ev.preventDefault();
+      ev.stopPropagation();
+    }
+  }, true);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) runSetupAudit(true).catch(() => {});
   });
@@ -1081,8 +1122,9 @@
   runBootIntro()
     .then(() => refresh())
     .then(async () => {
-      toast("Launcher ready");
+      // After logo lands: force update choice in the center before anything else
       try { await checkLauncherUpdateOnce(); } catch (_) {}
+      toast("Launcher ready");
       try { await runSetupAudit(true); } catch (_) {}
       try { await updateCheck(true); } catch (_) {}
     })

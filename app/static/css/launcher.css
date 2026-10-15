@@ -101,6 +101,15 @@ body.intro-active .brand-logo {
   display: block;
   border: 1px solid rgba(212, 175, 55, 0.4);
   box-shadow: 0 0 18px rgba(0, 140, 255, 0.18);
+  cursor: pointer;
+}
+.brand-logo:hover {
+  border-color: rgba(212, 175, 55, 0.75);
+  box-shadow: 0 0 22px rgba(0, 140, 255, 0.28);
+}
+.brand-logo:focus-visible {
+  outline: 2px solid rgba(212, 175, 55, 0.7);
+  outline-offset: 2px;
 }
 .brand-row .eyebrow { margin-bottom: 0.15rem; }
 .brand-row h1 { font-size: clamp(1.65rem, 3.6vw, 2.25rem); }
@@ -758,6 +767,21 @@ select option { background: #0d1219; }
   max-width: 55%;
   text-align: right;
 }
+.foot .linkish {
+  cursor: pointer;
+  color: var(--text);
+  text-decoration: underline;
+  text-underline-offset: 0.18em;
+  text-decoration-color: rgba(212, 175, 55, 0.45);
+}
+.foot .linkish:hover {
+  color: #f0e6c8;
+  text-decoration-color: rgba(212, 175, 55, 0.85);
+}
+.foot .linkish:focus-visible {
+  outline: 2px solid rgba(212, 175, 55, 0.7);
+  outline-offset: 2px;
+}
 .st-inline.ok {
   display: inline-block;
   font-family: var(--font-mono);
@@ -779,12 +803,29 @@ select option { background: #0d1219; }
   backdrop-filter: blur(2px);
 }
 .modal-backdrop[hidden] { display: none !important; }
+.modal-backdrop.update-modal {
+  z-index: 220;
+  background: rgba(0, 0, 0, 0.82);
+  backdrop-filter: blur(4px);
+}
+body.update-gate .shell {
+  pointer-events: none;
+  user-select: none;
+  filter: brightness(0.55);
+}
+body.update-gate .boot-splash {
+  pointer-events: none;
+}
 .modal {
   width: min(520px, 100%);
   padding: 1.25rem 1.35rem 1.1rem;
   border: 1px solid var(--line);
   background: #12141a;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.45);
+}
+.modal.update-modal-card {
+  width: min(560px, 100%);
+  text-align: left;
 }
 .modal h3 {
   margin: 0 0 0.65rem;

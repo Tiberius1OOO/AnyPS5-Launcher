@@ -1277,11 +1277,14 @@ def api_launcher_update():
 
 @app.post("/api/open-github")
 def api_open_github():
-    try:
-        webbrowser.open(GITHUB_URL)
-        return jsonify({"ok": True, "url": GITHUB_URL})
-    except Exception as e:
-        return jsonify({"ok": False, "error": str(e), "url": GITHUB_URL}), 500
+    """Return a GitHub URL for the UI to open once (do not open a browser here — that doubles tabs)."""
+    data = request.get_json(silent=True) or {}
+    which = str(data.get("which") or "anyps5").strip().lower()
+    if which in ("launcher", "self", "anyps5-launcher"):
+        url = LAUNCHER_GITHUB_URL
+    else:
+        url = GITHUB_URL
+    return jsonify({"ok": True, "url": url})
 
 
 @app.get("/api/readme")
