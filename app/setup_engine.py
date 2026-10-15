@@ -497,6 +497,18 @@ def run(
     except subprocess.TimeoutExpired:
         _log(log, "  [ABBRUCH] Timeout")
         return 1, "timeout"
+    except OSError as e:
+        msg = str(e)
+        _log(log, f"  [ABBRUCH] {msg}")
+        # WinError 8 = ERROR_NOT_ENOUGH_MEMORY; often a huge PATH / env block, not empty RAM
+        if getattr(e, "winerror", None) == 8 or "nicht genügend Speicher" in msg.lower() or "not enough memory" in msg.lower():
+            _log(
+                log,
+                "  [HINT] Windows could not start this process (WinError 8). "
+                "Close heavy apps, free RAM / grow the page file, reboot, then retry. "
+                "If PATH is very long, trim unused entries in System Environment Variables.",
+            )
+        return 1, msg
     except Exception as e:
         _log(log, f"  [ABBRUCH] {e}")
         return 1, str(e)
@@ -604,6 +616,17 @@ def run_streaming(
         if code != 0:
             _log(log, f"  [ABBRUCH] Exit-Code {code}")
         return code, "\n".join(merged[-80:])
+    except OSError as e:
+        msg = str(e)
+        _log(log, f"  [ABBRUCH] {msg}")
+        if getattr(e, "winerror", None) == 8 or "nicht genügend Speicher" in msg.lower() or "not enough memory" in msg.lower():
+            _log(
+                log,
+                "  [HINT] Windows could not start this process (WinError 8). "
+                "Close heavy apps, free RAM / grow the page file, reboot, then retry. "
+                "If PATH is very long, trim unused entries in System Environment Variables.",
+            )
+        return 1, msg
     except Exception as e:
         _log(log, f"  [ABBRUCH] {e}")
         return 1, str(e)
@@ -668,10 +691,31 @@ def download_with_progress(url: str, dest: Path, log: LogFn, step_id: str) -> bo
         return False
 
 
+def _join_path_unique(*segments: str) -> str:
+    """Join PATH pieces once each (case-insensitive). Avoids WinError 8 from a bloated env block."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for seg in segments:
+        if not seg:
+            continue
+        for part in seg.split(";"):
+            p = part.strip().strip('"')
+            if not p:
+                continue
+            key = p.rstrip("\\/").lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+    return ";".join(out)
+
+
 def refresh_path() -> None:
-    machine = os.environ.get("Path") or ""
-    # Rebuild from registry-like env
-    machine = os.environ.get("PATH", "")
+    """Rebuild process PATH from the registry only (never append the current PATH again).
+
+    Older code did machine+user+current_PATH on every call, which duplicated entries until
+    CreateProcess failed with WinError 8 (ERROR_NOT_ENOUGH_MEMORY) - often not real OOM.
+    """
     try:
         import winreg
 
@@ -679,22 +723,50 @@ def refresh_path() -> None:
             try:
                 with winreg.OpenKey(root, sub) as k:
                     val, _ = winreg.QueryValueEx(k, "Path")
-                    return val
+                    return str(val or "")
             except OSError:
                 return ""
 
         m = read(winreg.HKEY_LOCAL_MACHINE, r"SYSTEM\CurrentControlSet\Control\Session Manager\Environment")
         u = read(winreg.HKEY_CURRENT_USER, "Environment")
-        os.environ["Path"] = ";".join(p for p in (m, u, machine) if p)
-        os.environ["PATH"] = os.environ["Path"]
+        # Keep entries this process already added that are not in the registry yet
+        # (e.g. mid-install session prepends), but never re-stack the whole old PATH.
+        current = os.environ.get("Path") or os.environ.get("PATH") or ""
+        merged = _join_path_unique(m, u)
+        # Preserve only prefixes that are not already covered (session-only dirs)
+        merged_keys = {p.rstrip("\\/").lower() for p in merged.split(";") if p}
+        extras: list[str] = []
+        for part in current.split(";"):
+            p = part.strip().strip('"')
+            if not p:
+                continue
+            key = p.rstrip("\\/").lower()
+            if key in merged_keys:
+                continue
+            # Skip obvious duplicates from a previously ballooned PATH
+            if key in {e.rstrip("\\/").lower() for e in extras}:
+                continue
+            extras.append(p)
+        # Cap extras so a already-corrupted process env cannot stay huge
+        if len(extras) > 40:
+            extras = extras[:40]
+        path = _join_path_unique(";".join(extras), merged) if extras else merged
+        os.environ["Path"] = path
+        os.environ["PATH"] = path
     except Exception:
-        pass
+        # Still collapse duplicates in the live env if registry read fails
+        cur = os.environ.get("Path") or os.environ.get("PATH") or ""
+        if cur:
+            collapsed = _join_path_unique(cur)
+            os.environ["Path"] = collapsed
+            os.environ["PATH"] = collapsed
 
 
 def add_user_path(directory: Path, log: LogFn | None = None) -> None:
     directory = directory.resolve()
     if not directory.is_dir():
         return
+    norm = str(directory)
     try:
         import winreg
 
@@ -703,29 +775,27 @@ def add_user_path(directory: Path, log: LogFn | None = None) -> None:
                 current, _ = winreg.QueryValueEx(k, "Path")
             except OSError:
                 current = ""
-            parts = [p for p in current.split(";") if p]
-            norm = str(directory)
+            parts = [p for p in str(current).split(";") if p]
             if any(p.rstrip("\\").lower() == norm.rstrip("\\").lower() for p in parts):
                 _log(log, f"  [OK] PATH enthaelt bereits {norm}")
-                return
-            new = (current + ";" if current else "") + norm
-            winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, new)
-            _log(log, f"  [OK] Zu User-PATH hinzugefuegt: {norm}")
+            else:
+                new = (str(current) + ";" if current else "") + norm
+                winreg.SetValueEx(k, "Path", 0, winreg.REG_EXPAND_SZ, new)
+                _log(log, f"  [OK] Zu User-PATH hinzugefuegt: {norm}")
     except Exception as e:
         _log(log, f"  [!] PATH konnte nicht gesetzt werden: {e}")
-    # session
-    os.environ["Path"] = str(directory) + ";" + os.environ.get("Path", "")
+    # session (deduped)
+    os.environ["Path"] = _join_path_unique(norm, os.environ.get("Path") or os.environ.get("PATH") or "")
     os.environ["PATH"] = os.environ["Path"]
 
 
 def tool_env() -> dict:
     env = os.environ.copy()
-    parts = [
+    env["Path"] = _join_path_unique(
         str(CMAKE_BIN),
         str(WINLIBS_ROOT / "mingw64" / "bin"),
         env.get("Path", env.get("PATH", "")),
-    ]
-    env["Path"] = ";".join(p for p in parts if p)
+    )
     env["PATH"] = env["Path"]
     if SSL_CERT.exists():
         env["SSL_CERT_FILE"] = str(SSL_CERT)

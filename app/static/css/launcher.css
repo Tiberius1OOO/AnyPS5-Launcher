@@ -803,6 +803,21 @@ select option { background: #0d1219; }
 }
 .modal-actions { margin: 0; flex-wrap: wrap; }
 
+.update-notes {
+  max-height: 9rem;
+  overflow: auto;
+  margin: 0 0 0.85rem;
+  padding: 0.65rem 0.75rem;
+  border: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.35);
+  color: var(--muted);
+  font-size: 0.78rem;
+  line-height: 1.4;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-notes[hidden] { display: none !important; }
+
 .readme-body {
   margin-top: 0.5rem;
   padding: 1rem 1.15rem;

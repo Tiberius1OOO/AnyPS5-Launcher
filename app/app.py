@@ -29,6 +29,9 @@ def _resolve_dirs() -> tuple[Path, Path]:
 LAUNCHER_DIR, DATA_DIR = _resolve_dirs()
 if str(LAUNCHER_DIR) not in sys.path:
     sys.path.insert(0, str(LAUNCHER_DIR))
+
+from version import LAUNCHER_GITHUB_URL, LAUNCHER_RELEASES_PAGE, LAUNCHER_VERSION  # noqa: E402
+
 CONFIG_PATH = DATA_DIR / "launcher-config.json"
 INPUT_INI_PATH = DATA_DIR / "anyps5-input.ini"
 INPUT_PROFILE_PATH = DATA_DIR / "input-profile.json"
@@ -362,6 +365,8 @@ def find_python3_executable() -> Path | None:
 
 
 def tool_env() -> dict:
+    from setup_engine import _join_path_unique
+
     env = os.environ.copy()
     parts = [
         str(CMAKE_BIN),
@@ -375,7 +380,7 @@ def tool_env() -> dict:
         if scripts.is_dir():
             parts.append(str(scripts))
     parts.append(env.get("Path", env.get("PATH", "")))
-    env["Path"] = ";".join(p for p in parts if p)
+    env["Path"] = _join_path_unique(*parts)
     env["PATH"] = env["Path"]
     if SSL_CERT.exists():
         env["SSL_CERT_FILE"] = str(SSL_CERT)
@@ -991,10 +996,16 @@ def index():
 
 @app.get("/api/status")
 def api_status():
+    from self_update import get_state as launcher_update_state
+
     return jsonify(
         {
             "repoRoot": str(get_repo_root()),
             "githubUrl": GITHUB_URL,
+            "launcherVersion": LAUNCHER_VERSION,
+            "launcherGithubUrl": LAUNCHER_GITHUB_URL,
+            "launcherReleasesUrl": LAUNCHER_RELEASES_PAGE,
+            "launcherUpdate": launcher_update_state(),
             "build": build_status(),
             "git": git_status(),
             "config": load_config(),
@@ -1008,6 +1019,49 @@ def api_status():
             },
         }
     )
+
+
+@app.get("/api/launcher/update-check")
+def api_launcher_update_check():
+    """Check GitHub for a newer launcher release (once per runtime by default)."""
+    from self_update import check_for_update
+
+    force = str(request.args.get("force") or "").strip().lower() in ("1", "true", "yes")
+    try:
+        state = check_for_update(force=force)
+        return jsonify({"ok": True, **state})
+    except Exception as e:
+        return jsonify(
+            {
+                "ok": False,
+                "checked": True,
+                "updateAvailable": False,
+                "currentVersion": LAUNCHER_VERSION,
+                "error": str(e),
+                "canAutoUpdate": False,
+            }
+        ), 200
+
+
+@app.post("/api/launcher/update")
+def api_launcher_update():
+    """Download the latest release zip, replace files, and restart the exe."""
+    from self_update import apply_update
+
+    try:
+        result = apply_update()
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+    def _exit_soon() -> None:
+        # Give Waitress time to flush the JSON response before hard-exit
+        import time
+
+        time.sleep(0.6)
+        os._exit(0)
+
+    threading.Thread(target=_exit_soon, daemon=True).start()
+    return jsonify(result)
 
 
 @app.post("/api/open-github")
@@ -1742,7 +1796,7 @@ def main() -> None:
     port = int(os.environ.get("ANYPS5_LAUNCHER_PORT", "8765"))
     # ?boot=1 triggers the logo intro once; F5 uses a clean URL without it
     url = f"http://127.0.0.1:{port}/?boot=1"
-    print(f"AnyPS5 Launcher: http://127.0.0.1:{port}/")
+    print(f"AnyPS5 Launcher v{LAUNCHER_VERSION}: http://127.0.0.1:{port}/")
     print("Leave this window open. Press Ctrl+C to quit.")
     threading.Timer(0.8, lambda: webbrowser.open(url)).start()
     # Waitress: local UI server without Flask's "development server" warning

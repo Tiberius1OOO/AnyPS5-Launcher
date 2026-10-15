@@ -43,11 +43,21 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force -Path $stage | Out-Null
 
 $ico = Join-Path $Root "app\static\img\app-icon.ico"
+$versionPy = Join-Path $Root "app\version.py"
+$launcherVersion = "0.0.0"
+if (Test-Path $versionPy) {
+    $m = Select-String -Path $versionPy -Pattern 'LAUNCHER_VERSION\s*=\s*"([^"]+)"' | Select-Object -First 1
+    if ($m) { $launcherVersion = $m.Matches[0].Groups[1].Value }
+}
+Write-Host "Launcher version: $launcherVersion" -ForegroundColor Cyan
+
 $addData = @(
     "$(Join-Path $Root 'app\templates');templates",
     "$(Join-Path $Root 'app\static');static",
     "$(Join-Path $Root 'app\bootstrap.ps1');.",
     "$(Join-Path $Root 'app\setup_engine.py');.",
+    "$(Join-Path $Root 'app\version.py');.",
+    "$(Join-Path $Root 'app\self_update.py');.",
     "$(Join-Path $Root 'app\requirements.txt');."
 )
 
@@ -110,6 +120,7 @@ exit /b 1
 
 Copy-Item -Force (Join-Path $PSScriptRoot "LIESMICH.txt") (Join-Path $stage "LIESMICH.txt")
 Copy-Item -Force (Join-Path $Root "README.md") (Join-Path $stage "README.md") -ErrorAction SilentlyContinue
+Set-Content -Path (Join-Path $stage "VERSION.txt") -Value $launcherVersion -Encoding ASCII
 
 $zip = Join-Path $releaseDir "AnyPS5-Launcher-windows.zip"
 if (-not $SkipZip) {

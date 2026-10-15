@@ -13,6 +13,8 @@
   let adminWhyCopy = null;
   let pendingInstallMode = null; // "admin" | "plain" | null
   let lastSetupAudit = null;
+  let launcherUpdatePrompted = false; // once per page/runtime
+  let launcherUpdateBusy = false;
 
   function toast(msg, kind = "") {
     const el = $("toast");
@@ -236,6 +238,10 @@
     if ($("anyps5RootLabel") && data.repoRoot) {
       $("anyps5RootLabel").textContent = data.repoRoot;
     }
+    if ($("launcherVerLabel")) {
+      const ver = data.launcherVersion || (data.launcherUpdate && data.launcherUpdate.currentVersion) || "?";
+      $("launcherVerLabel").textContent = `Launcher v${ver}`;
+    }
 
     if ($("buildSyncLabel")) $("buildSyncLabel").textContent = b.syncLabel || "";
     $("bRelinker").textContent = b.relinker ? "OK" : "missing";
@@ -274,6 +280,98 @@
     else if (g.remoteOk !== false) { if (!quiet) toast("Already up to date", "ok"); }
     else toast("Update check failed", "error");
     return data;
+  }
+
+  function openLauncherUpdateModal(info) {
+    const modal = $("launcherUpdateModal");
+    if (!modal) return;
+    const cur = info.currentVersion || "?";
+    const latest = info.latestVersion || info.tagName || "?";
+    const body = $("launcherUpdateBody");
+    if (body) {
+      body.textContent = `Version ${latest} is available (you have ${cur}). `
+        + (info.canAutoUpdate
+          ? "Update Now downloads the release, replaces the launcher files, and restarts automatically. Your AnyPS5 folder and settings are kept."
+          : "Download the new zip from GitHub Releases and replace this launcher folder (or run the released .exe build to enable auto-update).");
+    }
+    const notes = $("launcherUpdateNotes");
+    if (notes) {
+      const text = (info.releaseNotes || "").trim();
+      if (text) {
+        notes.hidden = false;
+        notes.textContent = text;
+      } else {
+        notes.hidden = true;
+        notes.textContent = "";
+      }
+    }
+    const status = $("launcherUpdateStatus");
+    if (status) status.textContent = "";
+    const btnNow = $("btnLauncherUpdateNow");
+    if (btnNow) {
+      btnNow.disabled = false;
+      btnNow.textContent = info.canAutoUpdate ? "Update Now" : "Open Releases";
+      btnNow.dataset.mode = info.canAutoUpdate ? "auto" : "browser";
+      btnNow.dataset.htmlUrl = info.htmlUrl || "";
+    }
+    const btnKeep = $("btnLauncherKeepOld");
+    if (btnKeep) btnKeep.disabled = false;
+    modal.hidden = false;
+  }
+
+  function closeLauncherUpdateModal() {
+    const modal = $("launcherUpdateModal");
+    if (modal) modal.hidden = true;
+  }
+
+  async function checkLauncherUpdateOnce() {
+    if (launcherUpdatePrompted) return;
+    launcherUpdatePrompted = true;
+    try {
+      const data = await api("/api/launcher/update-check");
+      if (data && data.updateAvailable) {
+        openLauncherUpdateModal(data);
+      }
+    } catch (_) {
+      // Silent: offline / rate limit should not block the UI
+    }
+  }
+
+  async function startLauncherUpdate() {
+    if (launcherUpdateBusy) return;
+    const btnNow = $("btnLauncherUpdateNow");
+    const mode = (btnNow && btnNow.dataset.mode) || "auto";
+    if (mode === "browser") {
+      const url = (btnNow && btnNow.dataset.htmlUrl)
+        || "https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases";
+      window.open(url, "_blank", "noopener");
+      closeLauncherUpdateModal();
+      return;
+    }
+    launcherUpdateBusy = true;
+    if (btnNow) btnNow.disabled = true;
+    const btnKeep = $("btnLauncherKeepOld");
+    if (btnKeep) btnKeep.disabled = true;
+    const status = $("launcherUpdateStatus");
+    if (status) status.textContent = "Downloading update… the launcher will restart when done.";
+    setBusy(true);
+    try {
+      const data = await api("/api/launcher/update", { method: "POST", body: "{}" });
+      if (status) {
+        status.textContent = data.toVersion
+          ? `Installing v${data.toVersion} and restarting…`
+          : "Installing and restarting…";
+      }
+      toast("Updating launcher…", "ok");
+      // Process exits; new instance opens the browser again.
+    } catch (e) {
+      launcherUpdateBusy = false;
+      if (btnNow) btnNow.disabled = false;
+      if (btnKeep) btnKeep.disabled = false;
+      if (status) status.textContent = "";
+      setBusy(false);
+      toast(e.message || "Update failed", "error");
+    }
   }
 
   function showTab(name) {
@@ -779,6 +877,12 @@
   on("adminWhyModal", "click", (ev) => {
     if (ev.target === $("adminWhyModal")) closeAdminWhyModal();
   });
+  on("btnLauncherUpdateNow", "click", () => startLauncherUpdate());
+  on("btnLauncherKeepOld", "click", () => closeLauncherUpdateModal());
+  on("launcherUpdateModal", "click", (ev) => {
+    // Do not dismiss by backdrop click — user must choose Update or Keep
+    if (ev.target === $("launcherUpdateModal")) ev.stopPropagation();
+  });
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden) runSetupAudit(true).catch(() => {});
   });
@@ -945,6 +1049,7 @@
     .then(() => refresh())
     .then(async () => {
       toast("Launcher ready");
+      try { await checkLauncherUpdateOnce(); } catch (_) {}
       try { await runSetupAudit(true); } catch (_) {}
       try { await updateCheck(true); } catch (_) {}
     })

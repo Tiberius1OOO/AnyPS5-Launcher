@@ -12,6 +12,10 @@ This repository is the launcher only. It does not modify upstream AnyPS5.
 2. Unzip anywhere.
 3. Run **`AnyPS5Launcher.exe`** (or `Start-AnyPS5.cmd`).
 
+On each start the launcher checks [Releases](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases) once.
+If a newer version exists, you can **Update Now** (downloads the zip, replaces launcher files, restarts) or **Keep using Old version**.
+Your `AnyPS5` folder, configs, and logs are kept.
+
 ## First-time setup
 
 1. Open **Setup** → **Install / repair everything**.
