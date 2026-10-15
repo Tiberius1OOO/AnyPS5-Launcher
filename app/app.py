@@ -113,6 +113,8 @@ APP0_SKIP_DIR_NAMES = frozenset(
         "anyps5-out",
         ".git",
         "__pycache__",
+        "_self_backup",
+        "_duplex_",
     }
 )
 APP0_SKIP_FILE_NAMES = frozenset({"eboot.bin"})
@@ -913,6 +915,53 @@ def find_module_dir(game_root: Path) -> str | None:
     return None
 
 
+def _dir_has_guest_modules(path: Path) -> bool:
+    try:
+        return any(path.glob("*.prx")) or any(path.glob("*.elf"))
+    except OSError:
+        return False
+
+
+def find_extra_module_dirs(content_root: Path) -> list[str]:
+    """
+    Extra --module-dir paths for Unity/engine titles (Media/Modules, Media/Plugins, …).
+    Relinker only auto-converts sce_module/sce_modules/prx; everything else needs --module-dir.
+    """
+    extras: list[str] = []
+    seen: set[str] = set()
+
+    def add(rel: Path) -> None:
+        key = str(rel).replace("\\", "/").strip("/").lower()
+        if not key or key in seen:
+            return
+        if rel.name.lower() in ("sce_module", "sce_modules", "prx"):
+            return
+        full = content_root / rel
+        if full.is_dir() and _dir_has_guest_modules(full):
+            seen.add(key)
+            extras.append(str(rel).replace("\\", "/"))
+
+    for rel in (
+        Path("Media") / "Modules",
+        Path("Media") / "Plugins",
+        Path("modules"),
+        Path("Modules"),
+        Path("Plugins"),
+    ):
+        add(rel)
+
+    media = content_root / "Media"
+    if media.is_dir():
+        try:
+            for child in media.iterdir():
+                if child.is_dir():
+                    add(Path("Media") / child.name)
+        except OSError:
+            pass
+
+    return extras
+
+
 def find_mingw_runtime_sources() -> dict[str, Path]:
     """Locate each MinGW runtime DLL from WinLibs, the build libs folder, or gcc on PATH."""
     found: dict[str, Path] = {}
@@ -984,20 +1033,22 @@ def mingw_destinations_for_output(output_dir: Path) -> list[Path]:
     Folders that must contain the MinGW runtimes for LoadLibraryEx to succeed.
     - libs/: system .prx and any title libs loaded via $ORIGIN/libs
     - output_dir/: application directory (DEFAULT_DIRS)
-    - app0/sce_module* / prx: converted guest modules load from here
+    - any app0 folder that holds converted .prx / .guest.prx (sce_module, Media/Modules, …)
     """
     dests: list[Path] = [output_dir / "libs", output_dir]
     app0 = output_dir / "app0"
     if app0.is_dir():
-        for name in ("sce_module", "sce_modules", "prx"):
-            d = app0 / name
-            if d.is_dir():
-                dests.append(d)
-        # Nested module dirs (rare layouts)
-        for child in app0.iterdir():
-            if child.is_dir() and child.name.lower() in ("sce_module", "sce_modules", "prx"):
-                if child not in dests:
-                    dests.append(child)
+        try:
+            for d in app0.rglob("*"):
+                if not d.is_dir():
+                    continue
+                try:
+                    if any(d.glob("*.prx")) or any(d.glob("*.guest.prx")):
+                        dests.append(d)
+                except OSError:
+                    continue
+        except OSError:
+            pass
     # Dedupe
     out: list[Path] = []
     seen: set[str] = set()
@@ -1061,10 +1112,33 @@ def ensure_mingw_runtime_for_output(output_dir: Path) -> tuple[bool, str]:
     return True, f"MinGW runtimes OK in [{where}] (from {src}; wrote {written} file(s))"
 
 
+def _app0_resource_ignore(directory: str, names: list[str]) -> set[str]:
+    """Skip module trees / ELF/PRX so we never overwrite relinker guest modules with raw dumps."""
+    ignored: set[str] = set()
+    for name in names:
+        low = name.lower()
+        if low in APP0_SKIP_DIR_NAMES:
+            ignored.add(name)
+            continue
+        suffix = Path(name).suffix.lower()
+        if suffix in (".prx", ".elf") or low in APP0_SKIP_FILE_NAMES or suffix == ".exe":
+            ignored.add(name)
+            continue
+        # Unity / engine module folders (converted via --module-dir)
+        if low in ("modules", "plugins") and (Path(directory) / name).is_dir():
+            # Only skip when they actually contain modules
+            try:
+                if _dir_has_guest_modules(Path(directory) / name):
+                    ignored.add(name)
+            except OSError:
+                pass
+    return ignored
+
+
 def copy_game_resources_to_app0(content_root: Path, app0: Path) -> tuple[int, int]:
     """
     Copy title resources (wads, sce_sys, media, …) into app0/.
-    Skips eboot/elf and module dirs; the relinker already places converted modules under app0.
+    Skips eboot/elf/prx and module dirs; the relinker already places converted modules under app0.
     """
     app0.mkdir(parents=True, exist_ok=True)
     file_count = 0
@@ -1077,13 +1151,16 @@ def copy_game_resources_to_app0(content_root: Path, app0: Path) -> tuple[int, in
             if low in APP0_SKIP_DIR_NAMES:
                 continue
             dest = app0 / item.name
-            shutil.copytree(item, dest, dirs_exist_ok=True)
+            shutil.copytree(
+                item,
+                dest,
+                dirs_exist_ok=True,
+                ignore=_app0_resource_ignore,
+            )
             dir_count += 1
             file_count += sum(1 for p in dest.rglob("*") if p.is_file())
             continue
-        if low in APP0_SKIP_FILE_NAMES or item.suffix.lower() == ".elf":
-            continue
-        if item.suffix.lower() == ".exe":
+        if low in APP0_SKIP_FILE_NAMES or item.suffix.lower() in (".elf", ".prx", ".exe"):
             continue
         shutil.copy2(item, app0 / item.name)
         file_count += 1
@@ -1608,6 +1685,10 @@ def api_convert():
         if uf not in ("0", "1", "2"):
             uf = "0"
         args.append(f"unused-filter={uf}")
+        # Unity / engine titles ship modules outside sce_module (Media/Modules, Media/Plugins, …)
+        extra_module_dirs = find_extra_module_dirs(elf.parent)
+        for extra in extra_module_dirs:
+            args.extend(["--module-dir", extra])
         args.extend(["--rpath", "$ORIGIN/libs", str(elf), str(out_exe)])
     except Exception as e:
         return jsonify({"ok": False, "error": f"Convert setup failed: {e}"}), 500
@@ -1616,6 +1697,8 @@ def api_convert():
         set_job(True, kind="Convert", ok=None)
         append_job(f"Input:  {elf}")
         append_job(f"Module: {mod}")
+        if extra_module_dirs:
+            append_job(f"Extra modules: {', '.join(extra_module_dirs)}")
         append_job(f"Output: {out_exe}")
         append_job("> " + " ".join(args))
         ok = True
@@ -1655,8 +1738,31 @@ def api_convert():
                 append_job(
                     f"Copied game resources into {app0} "
                     f"({res_dirs} folder(s), {res_files} file(s); "
-                    "skipped eboot/elf and sce_module/prx)"
+                    "skipped eboot/elf/prx and module dirs)"
                 )
+                # Drop any leftover raw .prx next to *.guest.prx (older converts / ignore misses)
+                removed_raw = 0
+                try:
+                    for guest in app0.rglob("*.guest.prx"):
+                        raw = guest.with_name(guest.name.replace(".guest.prx", ""))
+                        # e.g. Il2CppUserAssemblies.prx.guest.prx -> Il2CppUserAssemblies.prx
+                        if raw.name.endswith(".prx") and raw.is_file() and raw != guest:
+                            raw.unlink()
+                            removed_raw += 1
+                    # Also strip *.prx that are not *.guest.prx under known module folders
+                    for sub in ("sce_module", "sce_modules", "prx", "Modules", "Plugins"):
+                        for folder in app0.rglob(sub):
+                            if not folder.is_dir():
+                                continue
+                            for prx in folder.glob("*.prx"):
+                                if prx.name.endswith(".guest.prx"):
+                                    continue
+                                prx.unlink()
+                                removed_raw += 1
+                except OSError as e:
+                    append_job(f"[WARN] Could not clean raw modules under app0: {e}")
+                if removed_raw:
+                    append_job(f"Removed {removed_raw} raw (unconverted) .prx under app0")
 
                 # MinGW runtimes: must sit next to every loaded .prx (libs/ and
                 # app0 guest modules) and in the exe directory. Windows does not
