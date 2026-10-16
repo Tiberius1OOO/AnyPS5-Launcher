@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 import webbrowser
@@ -142,6 +143,8 @@ _job: dict = {
     "phaseLabel": "",
     "progress": None,  # 0..100 or None
     "progressDetail": "",
+    "progressRate": "",  # e.g. "85.2 MB/s" — shown beside %
+    "progressBusy": False,  # True → shimmer animation on the bar
     "stepIndex": 0,
     "stepTotal": 0,
 }
@@ -667,6 +670,8 @@ def set_job(
             _job["phaseLabel"] = ""
             _job["progress"] = None
             _job["progressDetail"] = ""
+            _job["progressRate"] = ""
+            _job["progressBusy"] = False
             _job["stepIndex"] = 0
             _job["stepTotal"] = 0
             _reset_job_log(kind or _job.get("kind") or "job", name_hint=log_label)
@@ -686,6 +691,8 @@ def set_job(
                 _job["phaseLabel"] = ""
                 _job["progress"] = None
             _job["progressDetail"] = ""
+            _job["progressRate"] = ""
+            _job["progressBusy"] = False
 
 
 def set_job_progress(
@@ -694,6 +701,8 @@ def set_job_progress(
     label: str = "",
     percent: float | None = None,
     detail: str = "",
+    rate: str | None = None,
+    busy: bool | None = None,
     step: int | None = None,
     step_total: int | None = None,
 ) -> None:
@@ -707,6 +716,10 @@ def set_job_progress(
             _job["progress"] = max(0.0, min(100.0, float(percent)))
         if detail is not None:
             _job["progressDetail"] = detail
+        if rate is not None:
+            _job["progressRate"] = rate
+        if busy is not None:
+            _job["progressBusy"] = bool(busy)
         if step is not None:
             _job["stepIndex"] = int(step)
         if step_total is not None:
@@ -1388,6 +1401,109 @@ def _app0_resource_ignore(directory: str, names: list[str]) -> set[str]:
     return ignored
 
 
+def _fmt_bytes(n: float) -> str:
+    units = ("B", "KB", "MB", "GB", "TB")
+    v = float(max(n, 0))
+    for u in units:
+        if v < 1024 or u == units[-1]:
+            return f"{int(v)} B" if u == "B" else f"{v:.1f} {u}"
+        v /= 1024
+    return f"{n:.0f} B"
+
+
+def _fmt_rate(bps: float) -> str:
+    return f"{_fmt_bytes(bps)}/s"
+
+
+class _CopyRateMeter:
+    """Track bytes copied and emit a smoothed transfer rate string."""
+
+    def __init__(self) -> None:
+        self.bytes_done = 0
+        self._t0 = time.monotonic()
+        self._last_t = self._t0
+        self._last_b = 0
+        self._rate_bps = 0.0
+
+    def add(self, n: int) -> None:
+        if n <= 0:
+            return
+        self.bytes_done += n
+        now = time.monotonic()
+        dt = now - self._last_t
+        if dt >= 0.2:
+            self._rate_bps = (self.bytes_done - self._last_b) / max(dt, 1e-3)
+            self._last_t = now
+            self._last_b = self.bytes_done
+
+    @property
+    def rate_bps(self) -> float:
+        # Fallback to average if we haven't sampled yet
+        if self._rate_bps > 0:
+            return self._rate_bps
+        elapsed = max(time.monotonic() - self._t0, 1e-3)
+        return self.bytes_done / elapsed
+
+    @property
+    def rate_str(self) -> str:
+        return _fmt_rate(self.rate_bps)
+
+
+def _copy_file_chunked(src: Path, dest: Path, on_chunk=None, chunk_size: int = 1024 * 1024) -> int:
+    """
+    Copy one file; for larger files stream in chunks and call on_chunk(bytes_just_written).
+    Returns bytes written.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        size = src.stat().st_size
+    except OSError:
+        size = 0
+    # Small files: one-shot copy is fine
+    if size < 8 * 1024 * 1024:
+        shutil.copy2(src, dest)
+        if on_chunk and size:
+            on_chunk(size)
+        return size
+    written = 0
+    with src.open("rb") as fsrc, dest.open("wb") as fdst:
+        while True:
+            buf = fsrc.read(chunk_size)
+            if not buf:
+                break
+            fdst.write(buf)
+            written += len(buf)
+            if on_chunk:
+                on_chunk(len(buf))
+    try:
+        shutil.copystat(src, dest)
+    except OSError:
+        pass
+    return written
+
+
+def _iter_copy_tree_files(src: Path, dest: Path, ignore_fn):
+    """
+    Yield (src_file, dest_file) for every file that should be copied under src,
+    applying the same ignore rules as shutil.copytree(ignore=…).
+    """
+    dest.mkdir(parents=True, exist_ok=True)
+    for root, dirnames, filenames in os.walk(src):
+        root_p = Path(root)
+        try:
+            ignored = set(ignore_fn(str(root_p), list(dirnames) + list(filenames)) or [])
+        except Exception:
+            ignored = set()
+        dirnames[:] = sorted(d for d in dirnames if d not in ignored)
+        rel_root = root_p.relative_to(src)
+        target_dir = dest / rel_root
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for name in sorted(filenames):
+            if name in ignored:
+                continue
+            yield root_p / name, target_dir / name
+
+
 def copy_game_resources_to_app0(
     content_root: Path,
     app0: Path,
@@ -1401,6 +1517,8 @@ def copy_game_resources_to_app0(
     Also skips any folder that contains (or is inside) the live output_dir so nested
     defaults like game\\decrypted\\anyps5-out do not re-copy the package into itself.
 
+    on_progress receives a dict with live copy stats (bytes, rate, current file, …).
+
     Returns (file_count, dir_count, skipped_nested_output_dirs, manifest_lines).
     """
     app0.mkdir(parents=True, exist_ok=True)
@@ -1411,12 +1529,43 @@ def copy_game_resources_to_app0(
     if not content_root.is_dir():
         return 0, 0, skipped, manifest
 
+    meter = _CopyRateMeter()
+    last_ui = 0.0
+
+    def _emit(
+        *,
+        idx: int,
+        total: int,
+        name: str,
+        current_file: str = "",
+        force: bool = False,
+    ) -> None:
+        nonlocal last_ui
+        if not on_progress:
+            return
+        now = time.monotonic()
+        if not force and (now - last_ui) < 0.2:
+            return
+        last_ui = now
+        on_progress(
+            {
+                "idx": idx,
+                "total": total,
+                "name": name,
+                "files": file_count,
+                "dirs": dir_count,
+                "bytes_done": meter.bytes_done,
+                "rate_bps": meter.rate_bps,
+                "rate": meter.rate_str,
+                "current_file": current_file,
+            }
+        )
+
     items = sorted(content_root.iterdir(), key=lambda p: p.name.lower())
     total_items = max(len(items), 1)
     for idx, item in enumerate(items, start=1):
         low = item.name.lower()
-        if on_progress:
-            on_progress(idx, total_items, item.name, file_count, dir_count)
+        _emit(idx=idx, total=total_items, name=item.name, force=True)
         if item.is_dir():
             if low in APP0_SKIP_DIR_NAMES:
                 manifest.append(f"SKIP dir  {item.name}/  (module/output dir — relinker owns this)")
@@ -1429,16 +1578,29 @@ def copy_game_resources_to_app0(
                 manifest.append(f"SKIP dir  {item.name}/  (nested convert output)")
                 continue
             dest = app0 / item.name
-            shutil.copytree(
-                item,
-                dest,
-                dirs_exist_ok=True,
-                ignore=_app0_resource_ignore,
-            )
+            n_before = file_count
+            bytes_before = meter.bytes_done
+            for src_f, dest_f in _iter_copy_tree_files(item, dest, _app0_resource_ignore):
+                try:
+                    rel = str(src_f.relative_to(item)).replace("/", "\\")
+                except ValueError:
+                    rel = src_f.name
+                cur_name = f"{item.name}\\{rel}"
+
+                def _chunk(n: int, i=idx, nm=item.name, cur=cur_name) -> None:
+                    meter.add(n)
+                    _emit(idx=i, total=total_items, name=nm, current_file=cur)
+
+                _copy_file_chunked(src_f, dest_f, on_chunk=_chunk)
+                file_count += 1
+            n = file_count - n_before
             dir_count += 1
-            n = sum(1 for p in dest.rglob("*") if p.is_file())
-            file_count += n
-            manifest.append(f"COPY dir  {item.name}/  → app0\\{item.name}\\  ({n} file(s))")
+            copied_bytes = meter.bytes_done - bytes_before
+            manifest.append(
+                f"COPY dir  {item.name}/  → app0\\{item.name}\\  "
+                f"({n} file(s), {_fmt_bytes(copied_bytes)})"
+            )
+            _emit(idx=idx, total=total_items, name=item.name, force=True)
             continue
         if low in APP0_SKIP_FILE_NAMES or item.suffix.lower() in (".elf", ".prx", ".exe"):
             reason = "eboot/elf/prx/exe"
@@ -1446,13 +1608,15 @@ def copy_game_resources_to_app0(
                 reason = "reserved name"
             manifest.append(f"SKIP file {item.name}  ({reason})")
             continue
-        shutil.copy2(item, app0 / item.name)
-        try:
-            size = item.stat().st_size
-        except OSError:
-            size = 0
+
+        def _chunk_file(n: int, i=idx, nm=item.name) -> None:
+            meter.add(n)
+            _emit(idx=i, total=total_items, name=nm, current_file=nm)
+
+        size = _copy_file_chunked(item, app0 / item.name, on_chunk=_chunk_file)
         file_count += 1
         manifest.append(f"COPY file {item.name}  → app0\\{item.name}  ({size} bytes)")
+        _emit(idx=idx, total=total_items, name=item.name, force=True)
     return file_count, dir_count, skipped, manifest
 
 
@@ -2001,6 +2165,8 @@ def api_convert():
             label="Step 0/4 — Relinker converting binary (not done yet)",
             percent=5,
             detail="Wait for relinker. 'Conversion complete' only means the binary step finished.",
+            rate="",
+            busy=True,
             step=0,
             step_total=packaging_steps,
         )
@@ -2103,23 +2269,32 @@ def api_convert():
                 append_job(f"[1/4] Packaging file list — system .prx ({len(prx_list)}):")
                 count = 0
                 total_prx = max(len(prx_list), 1)
+                libs_meter = _CopyRateMeter()
+                set_job_progress(busy=True, rate="")
                 for prx in prx_list:
                     dest = libs_dest / prx.name
                     data = prx.read_bytes()
                     dest.write_bytes(data)
+                    libs_meter.add(len(data))
                     count += 1
                     append_job(f"  COPY  {prx.name}  →  libs\\{prx.name}  ({len(data)} bytes)")
-                    if count == 1 or count == total_prx or count % 20 == 0:
+                    if count == 1 or count == total_prx or count % 5 == 0:
                         pct = 52 + (10 * count / total_prx)
                         set_job_progress(
                             phase="system_libs",
                             label="Step 1/4 — Copying system libraries (.prx)",
                             percent=pct,
-                            detail=f"{count}/{len(prx_list)} → libs\\{prx.name}",
+                            detail=(
+                                f"{count}/{len(prx_list)} → libs\\{prx.name} · "
+                                f"{_fmt_bytes(libs_meter.bytes_done)}"
+                            ),
+                            rate=libs_meter.rate_str,
+                            busy=True,
                             step=1,
                             step_total=packaging_steps,
                         )
                 append_job(f"[1/4] Copied {count} system libs (.prx) to {libs_dest}")
+                set_job_progress(rate="", busy=False)
 
                 # ---- 2/4 game resources ----
                 set_job_progress(
@@ -2127,30 +2302,60 @@ def api_convert():
                     label="Step 2/4 — Copying game files into app0",
                     percent=65,
                     detail="This can take a while on large dumps — wait for step 3",
+                    rate="",
+                    busy=True,
                     step=2,
                     step_total=packaging_steps,
                 )
                 append_job("[2/4] Copying game resources into app0 (large dumps take time)…")
                 app0 = output_dir / "app0"
                 content_root = elf.parent
+                _last_logged_item = {"name": "", "files": -1}
 
-                def _res_progress(idx, total, name, files_so_far, dirs_so_far) -> None:
-                    frac = idx / max(total, 1)
+                def _res_progress(info) -> None:
+                    idx = int(info.get("idx") or 0)
+                    total = max(int(info.get("total") or 1), 1)
+                    name = str(info.get("name") or "")
+                    files_so_far = int(info.get("files") or 0)
+                    dirs_so_far = int(info.get("dirs") or 0)
+                    rate = str(info.get("rate") or "")
+                    cur = str(info.get("current_file") or "")
+                    bytes_done = int(info.get("bytes_done") or 0)
+                    # Advance overall % by top-level item, with a soft nudge from bytes
+                    # so a single huge folder still moves the bar a little.
+                    frac = (idx - 1) / total
+                    soft = min(0.9, bytes_done / (512 * 1024 * 1024)) * (1.0 / total)
+                    pct = 65 + (20 * min(1.0, frac + soft))
+                    detail_bits = [
+                        f"Item {idx}/{total}: {name}",
+                        f"{dirs_so_far} folder(s), {files_so_far} file(s)",
+                        _fmt_bytes(bytes_done) + " copied",
+                    ]
+                    if cur:
+                        detail_bits.append(cur)
                     set_job_progress(
                         phase="game_files",
                         label="Step 2/4 — Copying game files into app0",
-                        percent=65 + (20 * frac),
-                        detail=(
-                            f"Item {idx}/{total}: {name} "
-                            f"({dirs_so_far} folder(s), {files_so_far} file(s) so far)"
-                        ),
+                        percent=pct,
+                        detail=" · ".join(detail_bits),
+                        rate=rate,
+                        busy=True,
                         step=2,
                         step_total=packaging_steps,
                     )
-                    if idx == 1 or idx == total or idx % 5 == 0:
+                    if (
+                        name != _last_logged_item["name"]
+                        or files_so_far - _last_logged_item["files"] >= 500
+                        or idx == 1
+                        or idx == total
+                    ):
+                        _last_logged_item["name"] = name
+                        _last_logged_item["files"] = files_so_far
                         append_job(
                             f"  … game files {idx}/{total}: {name} "
-                            f"({files_so_far} files copied so far)"
+                            f"({files_so_far} files, {_fmt_bytes(bytes_done)}"
+                            + (f", {rate}" if rate else "")
+                            + ")"
                         )
 
                 res_files, res_dirs, skipped, res_manifest = copy_game_resources_to_app0(
@@ -2159,6 +2364,7 @@ def api_convert():
                     output_dir=output_dir,
                     on_progress=_res_progress,
                 )
+                set_job_progress(rate="", busy=False)
                 append_job("[2/4] Packaging file list — top-level game items:")
                 for line in res_manifest:
                     append_job(f"  {line}")

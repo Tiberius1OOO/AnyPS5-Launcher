@@ -428,10 +428,11 @@
     }
   }
 
-  function applyBarFill(fill, pct) {
+  function applyBarFill(fill, pct, busy) {
     if (!fill) return;
     const known = pct != null && !Number.isNaN(Number(pct));
     fill.classList.toggle("indeterminate", !known);
+    fill.classList.toggle("busy", !!(busy || !known));
     if (known) {
       fill.style.width = `${Math.max(0, Math.min(100, Number(pct)))}%`;
     } else {
@@ -449,8 +450,13 @@
     const running = !!(job && job.running);
     const phaseLabel = (job && (job.phaseLabel || job.phase)) || "";
     const pct = job && job.progress != null ? Number(job.progress) : null;
+    const rate = (job && job.progressRate) ? String(job.progressRate).trim() : "";
+    const busy = !!(job && job.progressBusy);
     if (!running && !(job && job.ok === false && phaseLabel)) {
       wrap.hidden = true;
+      if (fill) {
+        fill.classList.remove("busy", "indeterminate");
+      }
       return;
     }
     wrap.hidden = false;
@@ -459,12 +465,13 @@
         || (running ? `Running: ${job.kind || "Job"}` : "Job");
     }
     if (pctEl) {
-      pctEl.textContent = pct != null && !Number.isNaN(pct)
+      const pctBit = pct != null && !Number.isNaN(pct)
         ? `${Math.round(pct)}%`
         : (running ? "…" : "");
+      pctEl.textContent = rate && pctBit ? `${pctBit} · ${rate}` : pctBit;
     }
     if (detail) detail.textContent = (job && job.progressDetail) || "";
-    applyBarFill(fill, pct);
+    applyBarFill(fill, pct, busy || (running && !!rate));
   }
 
   async function enrichJobWithSetupProgress(job) {

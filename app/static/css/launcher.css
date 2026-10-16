@@ -663,6 +663,7 @@ select option { background: #0d1219; }
   width: 0%;
   background: linear-gradient(90deg, #3b82f6, #22c55e);
   transition: width 0.2s ease;
+  position: relative;
 }
 .setup-progress-bar.transfer .setup-progress-fill {
   background: linear-gradient(90deg, #22d3ee, #3b82f6);
@@ -678,6 +679,34 @@ select option { background: #0d1219; }
 @keyframes progress-indeterminate {
   0% { transform: translateX(-120%); }
   100% { transform: translateX(320%); }
+}
+/* Known % but actively copying — shimmer so large files never look frozen */
+.setup-progress-fill.busy:not(.indeterminate) {
+  background-image: linear-gradient(
+    90deg,
+    #3b82f6 0%,
+    #22c55e 40%,
+    #a7f3d0 50%,
+    #22c55e 60%,
+    #3b82f6 100%
+  );
+  background-size: 220% 100%;
+  animation: progress-shimmer 1.15s linear infinite;
+}
+.job-progress .setup-progress-fill.busy:not(.indeterminate) {
+  background-image: linear-gradient(
+    90deg,
+    #22d3ee 0%,
+    #3b82f6 35%,
+    #e0f2fe 50%,
+    #3b82f6 65%,
+    #22d3ee 100%
+  );
+  background-size: 220% 100%;
+}
+@keyframes progress-shimmer {
+  0% { background-position: 100% 0; }
+  100% { background-position: -100% 0; }
 }
 .setup-transfer {
   margin-top: 0.65rem;
