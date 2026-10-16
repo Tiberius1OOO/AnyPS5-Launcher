@@ -4,7 +4,7 @@ Windows desktop launcher for **[AnyPS5](https://github.com/boykopovar/AnyPS5)** 
 
 This repo is the **launcher only**. It does not fork or patch upstream AnyPS5. It installs the tools, clones the project next to the app, builds it, converts games, and starts them from a local browser UI.
 
-**Current release:** [v1.2.4](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
+**Current release:** [v1.2.5](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
 
 ---
 

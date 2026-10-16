@@ -428,15 +428,50 @@
     }
   }
 
+  function renderJobProgress(job) {
+    const wrap = $("jobProgressWrap");
+    const label = $("jobProgressLabel");
+    const pctEl = $("jobProgressPct");
+    const detail = $("jobProgressDetail");
+    const fill = $("jobProgressFill");
+    if (!wrap) return;
+    const running = !!(job && job.running);
+    const phaseLabel = (job && (job.phaseLabel || job.phase)) || "";
+    const pct = job && job.progress != null ? Number(job.progress) : null;
+    if (!running && !(job && job.ok === false && phaseLabel)) {
+      wrap.hidden = true;
+      return;
+    }
+    wrap.hidden = false;
+    if (label) {
+      label.textContent = phaseLabel
+        || (running ? `Running: ${job.kind || "Job"}` : "Job");
+    }
+    if (pctEl) {
+      pctEl.textContent = pct != null && !Number.isNaN(pct)
+        ? `${Math.round(pct)}%`
+        : (running ? "…" : "");
+    }
+    if (detail) detail.textContent = (job && job.progressDetail) || "";
+    if (fill) fill.style.width = pct != null && !Number.isNaN(pct) ? `${Math.max(0, Math.min(100, pct))}%` : "15%";
+  }
+
   async function pollJobOnce() {
     const job = await api("/api/job");
     const lines = job.lines || [];
     $("console").textContent = lines.length ? lines.join("\n") : ($("console").textContent || "...");
     $("console").scrollTop = $("console").scrollHeight;
     lastLineCount = lines.length;
-    $("jobStatus").textContent = job.running
-      ? `Running: ${job.kind || "Job"}`
-      : (job.ok === false ? "Error" : job.ok === true ? "Done" : "Ready");
+    renderJobProgress(job);
+    if (job.running) {
+      const bit = job.phaseLabel
+        || (job.progress != null ? `${job.kind || "Job"} ${Math.round(job.progress)}%` : null)
+        || `Running: ${job.kind || "Job"}`;
+      $("jobStatus").textContent = bit;
+    } else {
+      $("jobStatus").textContent =
+        job.ok === false ? "Error" : job.ok === true ? "Done" : "Ready";
+    }
     if ($("logPathHint") && job.logPath) {
       $("logPathHint").textContent = `Log file: ${job.logPath}`;
     }

@@ -135,6 +135,13 @@ _job: dict = {
     "finished": None,
     "logPath": str(LAST_JOB_LOG),
     "logHistoryPath": "",
+    # Live progress for UI (Convert packaging, etc.)
+    "phase": "",
+    "phaseLabel": "",
+    "progress": None,  # 0..100 or None
+    "progressDetail": "",
+    "stepIndex": 0,
+    "stepTotal": 0,
 }
 
 
@@ -587,11 +594,62 @@ def set_job(running: bool, kind: str = "", ok: bool | None = None) -> None:
             _job["lines"] = []
             _job["started"] = datetime.now(timezone.utc).isoformat()
             _job["finished"] = None
+            _job["phase"] = ""
+            _job["phaseLabel"] = ""
+            _job["progress"] = None
+            _job["progressDetail"] = ""
+            _job["stepIndex"] = 0
+            _job["stepTotal"] = 0
             _reset_job_log(kind or _job.get("kind") or "job")
         else:
             _job["finished"] = datetime.now(timezone.utc).isoformat()
             if not _job.get("logPath"):
                 _job["logPath"] = str(LAST_JOB_LOG)
+            if ok is True:
+                _job["phase"] = "done"
+                _job["phaseLabel"] = "Finished"
+                _job["progress"] = 100
+            elif ok is False:
+                _job["phase"] = "failed"
+                _job["phaseLabel"] = "Failed"
+            else:
+                _job["phase"] = ""
+                _job["phaseLabel"] = ""
+                _job["progress"] = None
+            _job["progressDetail"] = ""
+
+
+def set_job_progress(
+    *,
+    phase: str = "",
+    label: str = "",
+    percent: float | None = None,
+    detail: str = "",
+    step: int | None = None,
+    step_total: int | None = None,
+) -> None:
+    """Update live job progress for the Console UI (thread-safe)."""
+    with _job_lock:
+        if phase:
+            _job["phase"] = phase
+        if label:
+            _job["phaseLabel"] = label
+        if percent is not None:
+            _job["progress"] = max(0.0, min(100.0, float(percent)))
+        if detail is not None:
+            _job["progressDetail"] = detail
+        if step is not None:
+            _job["stepIndex"] = int(step)
+        if step_total is not None:
+            _job["stepTotal"] = int(step_total)
+
+
+def _path_is_under(child: Path, parent: Path) -> bool:
+    try:
+        child.resolve().relative_to(parent.resolve())
+        return True
+    except Exception:
+        return False
 
 
 def current_head() -> tuple[str, str]:
@@ -1135,20 +1193,42 @@ def _app0_resource_ignore(directory: str, names: list[str]) -> set[str]:
     return ignored
 
 
-def copy_game_resources_to_app0(content_root: Path, app0: Path) -> tuple[int, int]:
+def copy_game_resources_to_app0(
+    content_root: Path,
+    app0: Path,
+    *,
+    output_dir: Path | None = None,
+    on_progress=None,
+) -> tuple[int, int, list[str]]:
     """
     Copy title resources (wads, sce_sys, media, …) into app0/.
     Skips eboot/elf/prx and module dirs; the relinker already places converted modules under app0.
+    Also skips any folder that contains (or is inside) the live output_dir so nested
+    defaults like game\\decrypted\\anyps5-out do not re-copy the package into itself.
+
+    Returns (file_count, dir_count, skipped_dir_names).
     """
     app0.mkdir(parents=True, exist_ok=True)
     file_count = 0
     dir_count = 0
+    skipped: list[str] = []
     if not content_root.is_dir():
-        return 0, 0
-    for item in sorted(content_root.iterdir(), key=lambda p: p.name.lower()):
+        return 0, 0, skipped
+
+    items = sorted(content_root.iterdir(), key=lambda p: p.name.lower())
+    total_items = max(len(items), 1)
+    for idx, item in enumerate(items, start=1):
         low = item.name.lower()
+        if on_progress:
+            on_progress(idx, total_items, item.name, file_count, dir_count)
         if item.is_dir():
             if low in APP0_SKIP_DIR_NAMES:
+                continue
+            # Do not copy a tree that contains the output folder (or is inside it)
+            if output_dir is not None and (
+                _path_is_under(output_dir, item) or _path_is_under(item, output_dir)
+            ):
+                skipped.append(item.name)
                 continue
             dest = app0 / item.name
             shutil.copytree(
@@ -1164,7 +1244,7 @@ def copy_game_resources_to_app0(content_root: Path, app0: Path) -> tuple[int, in
             continue
         shutil.copy2(item, app0 / item.name)
         file_count += 1
-    return file_count, dir_count
+    return file_count, dir_count, skipped
 
 
 def browse_dialog(kind: str) -> str | None:
@@ -1694,12 +1774,27 @@ def api_convert():
 
     def worker() -> None:
         set_job(True, kind="Convert", ok=None)
+        packaging_steps = 4
+        set_job_progress(
+            phase="relinker",
+            label="Step 0/4 — Relinker converting binary (not done yet)",
+            percent=5,
+            detail="Wait for relinker. 'Conversion complete' only means the binary step finished.",
+            step=0,
+            step_total=packaging_steps,
+        )
         append_job(f"Input:  {elf}")
         append_job(f"Module: {mod}")
         if extra_module_dirs:
             append_job(f"Extra modules: {', '.join(extra_module_dirs)}")
         append_job(f"Output: {out_exe}")
         append_job("> " + " ".join(args))
+        append_job("")
+        append_job(
+            "NOTE: After the relinker prints 'Conversion complete', packaging still runs "
+            "(system libs → game files → MinGW DLLs). Do not start the game until you see "
+            "'=== done ==='."
+        )
         ok = True
         try:
             proc = subprocess.Popen(
@@ -1715,30 +1810,110 @@ def api_convert():
             )
             assert proc.stdout is not None
             for line in proc.stdout:
-                append_job(line.rstrip())
+                text = line.rstrip()
+                append_job(text)
+                low = text.lower()
+                if "conversion complete" in low or "write output" in low:
+                    set_job_progress(
+                        phase="relinker",
+                        label="Step 0/4 — Relinker finishing…",
+                        percent=48,
+                        detail="Binary step almost done — packaging comes next",
+                    )
             if proc.wait() != 0:
                 ok = False
                 append_job("ERROR: exit code from relinker (see output above)")
                 append_job("Relinker failed.")
             else:
+                append_job("")
+                append_job("=" * 60)
+                append_job("Relinker finished converting the binary.")
+                append_job("Packaging is NOT done yet — do not start the game.")
+                append_job(
+                    "Remaining: 1) system libs  2) game files  3) MinGW DLLs  4) finish"
+                )
+                append_job("=" * 60)
+                append_job("")
+
+                # ---- 1/4 system libs ----
+                set_job_progress(
+                    phase="system_libs",
+                    label="Step 1/4 — Copying system libraries (.prx)",
+                    percent=52,
+                    detail="Copying built .prx into output\\libs",
+                    step=1,
+                    step_total=packaging_steps,
+                )
                 libs_dest = output_dir / "libs"
                 libs_dest.mkdir(parents=True, exist_ok=True)
+                prx_list = list(get_libs_dir().glob("*.prx"))
                 count = 0
-                for prx in get_libs_dir().glob("*.prx"):
+                total_prx = max(len(prx_list), 1)
+                for prx in prx_list:
                     dest = libs_dest / prx.name
                     dest.write_bytes(prx.read_bytes())
                     count += 1
-                append_job(f"Copied {count} system libs (.prx) to {libs_dest}")
+                    if count == 1 or count == total_prx or count % 20 == 0:
+                        pct = 52 + (10 * count / total_prx)
+                        set_job_progress(
+                            phase="system_libs",
+                            label="Step 1/4 — Copying system libraries (.prx)",
+                            percent=pct,
+                            detail=f"{count}/{len(prx_list)} → libs\\{prx.name}",
+                            step=1,
+                            step_total=packaging_steps,
+                        )
+                append_job(f"[1/4] Copied {count} system libs (.prx) to {libs_dest}")
 
+                # ---- 2/4 game resources ----
+                set_job_progress(
+                    phase="game_files",
+                    label="Step 2/4 — Copying game files into app0",
+                    percent=65,
+                    detail="This can take a while on large dumps — wait for step 3",
+                    step=2,
+                    step_total=packaging_steps,
+                )
+                append_job("[2/4] Copying game resources into app0 (large dumps take time)…")
                 app0 = output_dir / "app0"
-                # Relinker already writes converted modules under app0/; add title resources.
                 content_root = elf.parent
-                res_files, res_dirs = copy_game_resources_to_app0(content_root, app0)
+
+                def _res_progress(idx, total, name, files_so_far, dirs_so_far) -> None:
+                    frac = idx / max(total, 1)
+                    set_job_progress(
+                        phase="game_files",
+                        label="Step 2/4 — Copying game files into app0",
+                        percent=65 + (20 * frac),
+                        detail=(
+                            f"Item {idx}/{total}: {name} "
+                            f"({dirs_so_far} folder(s), {files_so_far} file(s) so far)"
+                        ),
+                        step=2,
+                        step_total=packaging_steps,
+                    )
+                    if idx == 1 or idx == total or idx % 5 == 0:
+                        append_job(
+                            f"  … game files {idx}/{total}: {name} "
+                            f"({files_so_far} files copied so far)"
+                        )
+
+                res_files, res_dirs, skipped = copy_game_resources_to_app0(
+                    content_root,
+                    app0,
+                    output_dir=output_dir,
+                    on_progress=_res_progress,
+                )
                 append_job(
-                    f"Copied game resources into {app0} "
+                    f"[2/4] Copied game resources into {app0} "
                     f"({res_dirs} folder(s), {res_files} file(s); "
                     "skipped eboot/elf/prx and module dirs)"
                 )
+                if skipped:
+                    append_job(
+                        f"[2/4] Skipped nested output path(s) inside game folder: "
+                        f"{', '.join(skipped)} (avoids re-copying the package into itself)"
+                    )
+
                 # Drop any leftover raw .prx next to *.guest.prx (older converts / ignore misses)
                 removed_raw = 0
                 try:
@@ -1763,14 +1938,24 @@ def api_convert():
                 if removed_raw:
                     append_job(f"Removed {removed_raw} raw (unconverted) .prx under app0")
 
-                # MinGW runtimes: must sit next to every loaded .prx (libs/ and
-                # app0 guest modules) and in the exe directory. Windows does not
-                # search PATH for these (see AnyPS5 docs — error 126 otherwise).
+                # ---- 3/4 MinGW DLLs (required — prevents GetLastError 126) ----
+                set_job_progress(
+                    phase="mingw",
+                    label="Step 3/4 — Copying MinGW runtime DLLs (prevents error 126)",
+                    percent=90,
+                    detail="libgcc / libstdc++ / libwinpthread into libs and app0",
+                    step=3,
+                    step_total=packaging_steps,
+                )
+                append_job(
+                    "[3/4] Copying MinGW runtime DLLs (required — without these, "
+                    "launch fails with GetLastError 126)…"
+                )
                 dests = mingw_destinations_for_output(output_dir)
                 dll_n, dll_missing, dll_srcs = copy_mingw_runtime_dlls(*dests)
                 if dll_n:
                     append_job(
-                        f"Copied MinGW runtime DLL(s) ×{dll_n} into "
+                        f"[3/4] Copied MinGW runtime DLL(s) ×{dll_n} into "
                         f"{', '.join(str(d) for d in dests)} "
                         f"({', '.join(MINGW_RUNTIME_DLLS)}; from {dll_srcs[0] if dll_srcs else '?'})"
                     )
@@ -1786,7 +1971,16 @@ def api_convert():
                         "(e.g. Failed to load module: libs\\*.prx)."
                     )
 
-                # Ship keyboard/mouse config next to the exe
+                # ---- 4/4 finish ----
+                set_job_progress(
+                    phase="finish",
+                    label="Step 4/4 — Finishing (input config + save paths)",
+                    percent=96,
+                    detail="Almost done",
+                    step=4,
+                    step_total=packaging_steps,
+                )
+                append_job("[4/4] Writing input config and saving paths…")
                 dest_ini = output_dir / "anyps5-input.ini"
                 try:
                     if INPUT_INI_PATH.is_file():
@@ -1802,7 +1996,7 @@ def api_convert():
                             bindings_to_ini(default_keyboard_bindings()),
                             encoding="utf-8",
                         )
-                    append_job(f"Input config ready: {dest_ini}")
+                    append_job(f"[4/4] Input config ready: {dest_ini}")
                 except Exception as e:
                     append_job(f"[WARN] Input config not copied: {e}")
                 cfg2 = load_config()
@@ -1811,7 +2005,16 @@ def api_convert():
                 cfg2["lastOutputExe"] = str(out_exe)
                 cfg2["outputName"] = out_name
                 save_config(cfg2)
+                set_job_progress(
+                    phase="done",
+                    label="Convert finished — safe to start the game",
+                    percent=100,
+                    detail=str(out_exe),
+                    step=4,
+                    step_total=packaging_steps,
+                )
                 append_job(f"Done: {out_exe}")
+                append_job("You can start the game now (Start game / the .exe).")
         except Exception as e:
             ok = False
             append_job(f"ERROR: {e}")
