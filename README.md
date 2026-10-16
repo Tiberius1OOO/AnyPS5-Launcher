@@ -4,7 +4,7 @@ Windows desktop launcher for **[AnyPS5](https://github.com/boykopovar/AnyPS5)** 
 
 This repo is the **launcher only**. It does not fork or patch upstream AnyPS5. It installs the tools, clones the project next to the app, builds it, converts games, and starts them from a local browser UI.
 
-**Current release:** [v1.2.6](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
+**Current release:** [v1.2.7](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
 
 ---
 
@@ -64,7 +64,7 @@ Status chips in the header show branch, commit, pending updates, and whether the
 | **Updates** | Check AnyPS5 for new commits; download (pull); open upstream GitHub; pending + recent history lists |
 | **Build** | Status for converter, system libs, compiler, build tools; **Build now**; **Mark as up to date** |
 | **README** | Live upstream AnyPS5 readme from GitHub (reload / open on GitHub) |
-| **Console** | Streaming log for install, update, build, convert; **Open log file** → `logs\last-job.log` |
+| **Console** | Streaming log for install, update, build, convert; **Open log file** → per-game `logs\convert-<game>-<timestamp>.log` (also copied beside the game as `convert-<game>.log`) |
 
 Hero actions: **Start game** and **Check updates** are always available from the top bar.
 
@@ -125,7 +125,8 @@ On Setup: **ok** = present, **next** = still required. Use **Console** if someth
 | Symptom | What to try |
 |---------|-------------|
 | Setup / Build fails | **Console** tab + `logs\last-job.log` next to the exe |
-| Convert / start: error **126** | Re-run Convert (or Start game) so MinGW DLLs land next to the exe and under `app0` module dirs |
+| Convert / start: error **126** | Re-run Convert (or Start game) so MinGW DLLs land next to the exe and under `app0` module dirs. Send the game’s `convert-<game>-*.log` — it lists every packaged file and verifies the three MinGW DLLs |
+| Relinker: `Skipping SELF container` | Dump modules are still wrapped; unwrap with AnyPS5’s `tools/unwrap_self.py` before Convert (otherwise **Converted modules: 0**) |
 | Unity / Il2Cpp titles fail to load modules | Ensure Convert sees `Media/Modules` / `Media/Plugins` (v1.2.2+ passes `--module-dir` automatically) |
 | Launcher Update Now stuck (old build) | Manually install [latest zip](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest) once |
 | Build cannot find Python | Setup → Install / repair (installs a real `python.exe`; Build also passes `-DPython3_EXECUTABLE=…`) |

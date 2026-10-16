@@ -522,7 +522,15 @@
         job.ok === false ? "Error" : job.ok === true ? "Done" : "Ready";
     }
     if ($("logPathHint") && job.logPath) {
-      $("logPathHint").textContent = `Log file: ${job.logPath}`;
+      const hist = job.logHistoryPath || "";
+      const gameLog = job.logGamePath || "";
+      if (hist) {
+        $("logPathHint").textContent = gameLog
+          ? `Convert log: ${hist}  |  beside game: ${gameLog}`
+          : `Log file: ${hist}`;
+      } else {
+        $("logPathHint").textContent = `Log file: ${job.logPath}`;
+      }
     }
     return job;
   }
@@ -542,7 +550,10 @@
           await refresh();
           if (job.ok === true) toast(`${job.kind || "Job"} finished`, "ok");
           if (job.ok === false) {
-            const logHint = job.logPath ? " Send logs\\last-job.log if you need help." : "";
+            const sendLog = job.logHistoryPath || job.logPath || "";
+            const logHint = sendLog
+              ? ` Send ${sendLog.split(/[/\\\\]/).pop()} if you need help.`
+              : "";
             toast(`${job.kind || "Job"} failed. See Console (scroll up for the real error).${logHint}`, "error");
           }
         }

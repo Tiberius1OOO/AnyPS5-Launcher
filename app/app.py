@@ -136,6 +136,7 @@ _job: dict = {
     "finished": None,
     "logPath": str(LAST_JOB_LOG),
     "logHistoryPath": "",
+    "logGamePath": "",
     # Live progress for UI (Convert packaging, etc.)
     "phase": "",
     "phaseLabel": "",
@@ -453,10 +454,33 @@ def _safe_log_name(kind: str) -> str:
     return out.strip("-") or "job"
 
 
+def _game_log_label(game_root: Path) -> str:
+    """Short filesystem-safe game name for convert logs (folder name preferred)."""
+    generic = {
+        "app0",
+        "app",
+        "decrypted",
+        "anyps5-out",
+        "sce_module",
+        "sce_modules",
+        "prx",
+        "game",
+        "roms",
+        "ps5",
+    }
+    try:
+        name = (game_root.name or "").strip()
+        if name.lower() in generic and game_root.parent:
+            name = game_root.parent.name or name
+        return _safe_log_name(name)[:80]
+    except Exception:
+        return "game"
+
+
 def _write_job_log_line(line: str) -> None:
-    """Append one line to last-job.log and the dated copy (caller holds lock)."""
+    """Append one line to last-job.log and the dated/game copy (caller holds lock)."""
     payload = line + "\n"
-    for key in ("logPath", "logHistoryPath"):
+    for key in ("logPath", "logHistoryPath", "logGamePath"):
         raw = str(_job.get(key) or "").strip()
         if not raw:
             continue
@@ -469,27 +493,60 @@ def _write_job_log_line(line: str) -> None:
             pass
 
 
-def _reset_job_log(kind: str) -> None:
+def _reset_job_log(kind: str, *, name_hint: str = "") -> None:
     """Start fresh log files for a new job (caller holds lock)."""
     try:
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
     except Exception:
         return
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    hist = LOGS_DIR / f"{_safe_log_name(kind)}-{stamp}.log"
+    kind_slug = _safe_log_name(kind)
+    hint = _safe_log_name(name_hint) if name_hint else ""
+    if hint and kind_slug == "convert":
+        hist_name = f"convert-{hint}-{stamp}.log"
+    elif hint:
+        hist_name = f"{kind_slug}-{hint}-{stamp}.log"
+    else:
+        hist_name = f"{kind_slug}-{stamp}.log"
+    hist = LOGS_DIR / hist_name
     header = (
         f"AnyPS5 Launcher job: {kind or 'job'}\n"
         f"Started (UTC): {datetime.now(timezone.utc).isoformat()}\n"
         f"Repo: {get_repo_root()}\n"
-        f"{'=' * 60}\n"
     )
+    if hint:
+        header += f"Game label: {hint}\n"
+    header += f"{'=' * 60}\n"
     _job["logPath"] = str(LAST_JOB_LOG)
     _job["logHistoryPath"] = str(hist)
+    _job["logGamePath"] = ""
     for path in (LAST_JOB_LOG, hist):
         try:
             path.write_text(header, encoding="utf-8")
         except Exception:
             pass
+
+
+def _attach_game_convert_log(output_dir: Path, game_label: str) -> Path | None:
+    """
+    Also write the convert log next to the game output (easy for users to find/send).
+    Call after output_dir exists; subsequent append_job lines go there too.
+    """
+    try:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        label = _safe_log_name(game_label) or "game"
+        dest = output_dir / f"convert-{label}.log"
+        # Seed with whatever was already written to the history log
+        hist = Path(str(_job.get("logHistoryPath") or ""))
+        if hist.is_file():
+            dest.write_bytes(hist.read_bytes())
+        else:
+            dest.write_text("", encoding="utf-8")
+        with _job_lock:
+            _job["logGamePath"] = str(dest)
+        return dest
+    except Exception:
+        return None
 
 
 def _failure_snippets(lines: list[str], limit: int = 12) -> list[str]:
@@ -566,6 +623,8 @@ def note_job_failure_hints() -> None:
     with _job_lock:
         lines = list(_job.get("lines") or [])
         log_path = str(_job.get("logPath") or LAST_JOB_LOG)
+        hist = str(_job.get("logHistoryPath") or "").strip()
+        game_log = str(_job.get("logGamePath") or "").strip()
     snippets = _failure_snippets(lines)
     append_job("")
     append_job("The line 'ERROR: exit code …' only means the command failed.")
@@ -573,7 +632,10 @@ def note_job_failure_hints() -> None:
         append_job("Likely cause (from earlier output):")
         for s in snippets:
             append_job(f"  {s}")
-    append_job(f"Full log file (send this if you need help): {log_path}")
+    send = hist or log_path
+    append_job(f"Full log file (send this if you need help): {send}")
+    if game_log:
+        append_job(f"Same log beside game output: {game_log}")
     append_job(f"Log folder: {LOGS_DIR}")
 
 
@@ -585,7 +647,13 @@ def append_job(line: str) -> None:
         _write_job_log_line(line)
 
 
-def set_job(running: bool, kind: str = "", ok: bool | None = None) -> None:
+def set_job(
+    running: bool,
+    kind: str = "",
+    ok: bool | None = None,
+    *,
+    log_label: str = "",
+) -> None:
     with _job_lock:
         _job["running"] = running
         if kind:
@@ -601,7 +669,7 @@ def set_job(running: bool, kind: str = "", ok: bool | None = None) -> None:
             _job["progressDetail"] = ""
             _job["stepIndex"] = 0
             _job["stepTotal"] = 0
-            _reset_job_log(kind or _job.get("kind") or "job")
+            _reset_job_log(kind or _job.get("kind") or "job", name_hint=log_label)
         else:
             _job["finished"] = datetime.now(timezone.utc).isoformat()
             if not _job.get("logPath"):
@@ -1237,26 +1305,38 @@ def mingw_destinations_for_output(output_dir: Path) -> list[Path]:
     return out
 
 
-def copy_mingw_runtime_dlls(*dest_dirs: Path) -> tuple[int, list[str], list[str]]:
+def copy_mingw_runtime_dlls(
+    *dest_dirs: Path,
+) -> tuple[int, list[str], list[str], list[tuple[str, str, int, bool]]]:
     """
     Copy MinGW runtime DLLs into each destination directory.
-    Returns (files_written, missing_names, source_dirs_used).
+    Returns (files_written, missing_names, source_dirs_used, details).
+    details entries: (dll_name, dest_path, bytes, ok).
     """
     sources = find_mingw_runtime_sources()
     missing = [n for n in MINGW_RUNTIME_DLLS if n not in sources]
     written = 0
     used: list[str] = []
+    details: list[tuple[str, str, int, bool]] = []
     for dest_dir in dest_dirs:
         if dest_dir is None:
             continue
         dest_dir.mkdir(parents=True, exist_ok=True)
         for name, src in sources.items():
-            if _copy_file_bytes(src, dest_dir / name):
+            dest = dest_dir / name
+            ok = _copy_file_bytes(src, dest)
+            size = 0
+            if ok:
                 written += 1
+                try:
+                    size = dest.stat().st_size
+                except OSError:
+                    size = 0
                 src_dir = str(src.parent)
                 if src_dir not in used:
                     used.append(src_dir)
-    return written, missing, used
+            details.append((name, str(dest), size, ok))
+    return written, missing, used, details
 
 
 def verify_mingw_in_libs(libs_dest: Path) -> list[str]:
@@ -1272,7 +1352,7 @@ def ensure_mingw_runtime_for_output(output_dir: Path) -> tuple[bool, str]:
     output_dir = Path(output_dir)
     libs = output_dir / "libs"
     dests = mingw_destinations_for_output(output_dir)
-    written, missing, used = copy_mingw_runtime_dlls(*dests)
+    written, missing, used, _details = copy_mingw_runtime_dlls(*dests)
     still = verify_mingw_in_libs(libs)
     if still:
         return (
@@ -1314,21 +1394,22 @@ def copy_game_resources_to_app0(
     *,
     output_dir: Path | None = None,
     on_progress=None,
-) -> tuple[int, int, list[str]]:
+) -> tuple[int, int, list[str], list[str]]:
     """
     Copy title resources (wads, sce_sys, media, …) into app0/.
     Skips eboot/elf/prx and module dirs; the relinker already places converted modules under app0.
     Also skips any folder that contains (or is inside) the live output_dir so nested
     defaults like game\\decrypted\\anyps5-out do not re-copy the package into itself.
 
-    Returns (file_count, dir_count, skipped_dir_names).
+    Returns (file_count, dir_count, skipped_nested_output_dirs, manifest_lines).
     """
     app0.mkdir(parents=True, exist_ok=True)
     file_count = 0
     dir_count = 0
     skipped: list[str] = []
+    manifest: list[str] = []
     if not content_root.is_dir():
-        return 0, 0, skipped
+        return 0, 0, skipped, manifest
 
     items = sorted(content_root.iterdir(), key=lambda p: p.name.lower())
     total_items = max(len(items), 1)
@@ -1338,12 +1419,14 @@ def copy_game_resources_to_app0(
             on_progress(idx, total_items, item.name, file_count, dir_count)
         if item.is_dir():
             if low in APP0_SKIP_DIR_NAMES:
+                manifest.append(f"SKIP dir  {item.name}/  (module/output dir — relinker owns this)")
                 continue
             # Do not copy a tree that contains the output folder (or is inside it)
             if output_dir is not None and (
                 _path_is_under(output_dir, item) or _path_is_under(item, output_dir)
             ):
                 skipped.append(item.name)
+                manifest.append(f"SKIP dir  {item.name}/  (nested convert output)")
                 continue
             dest = app0 / item.name
             shutil.copytree(
@@ -1353,13 +1436,24 @@ def copy_game_resources_to_app0(
                 ignore=_app0_resource_ignore,
             )
             dir_count += 1
-            file_count += sum(1 for p in dest.rglob("*") if p.is_file())
+            n = sum(1 for p in dest.rglob("*") if p.is_file())
+            file_count += n
+            manifest.append(f"COPY dir  {item.name}/  → app0\\{item.name}\\  ({n} file(s))")
             continue
         if low in APP0_SKIP_FILE_NAMES or item.suffix.lower() in (".elf", ".prx", ".exe"):
+            reason = "eboot/elf/prx/exe"
+            if low in APP0_SKIP_FILE_NAMES:
+                reason = "reserved name"
+            manifest.append(f"SKIP file {item.name}  ({reason})")
             continue
         shutil.copy2(item, app0 / item.name)
+        try:
+            size = item.stat().st_size
+        except OSError:
+            size = 0
         file_count += 1
-    return file_count, dir_count, skipped
+        manifest.append(f"COPY file {item.name}  → app0\\{item.name}  ({size} bytes)")
+    return file_count, dir_count, skipped, manifest
 
 
 def browse_dialog(kind: str) -> str | None:
@@ -1522,12 +1616,22 @@ def api_job():
 
 @app.post("/api/logs/open")
 def api_open_logs():
-    """Open last-job.log (or the logs folder) in Explorer."""
+    """Open the latest job log (prefer per-game convert log) in Explorer."""
     try:
         LOGS_DIR.mkdir(parents=True, exist_ok=True)
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)}), 500
-    target = LAST_JOB_LOG if LAST_JOB_LOG.is_file() else LOGS_DIR
+    with _job_lock:
+        hist = str(_job.get("logHistoryPath") or "").strip()
+        game_log = str(_job.get("logGamePath") or "").strip()
+    target = LAST_JOB_LOG
+    for cand in (hist, game_log, str(LAST_JOB_LOG)):
+        p = Path(cand) if cand else None
+        if p and p.is_file():
+            target = p
+            break
+    if not target.is_file():
+        target = LOGS_DIR
     try:
         if target.is_file():
             subprocess.Popen(["explorer", f"/select,{target}"])
@@ -1888,7 +1992,9 @@ def api_convert():
         return jsonify({"ok": False, "error": f"Convert setup failed: {e}"}), 500
 
     def worker() -> None:
-        set_job(True, kind="Convert", ok=None)
+        game_label = _game_log_label(game_root)
+        set_job(True, kind="Convert", ok=None, log_label=game_label)
+        game_log = _attach_game_convert_log(output_dir, game_label)
         packaging_steps = 4
         set_job_progress(
             phase="relinker",
@@ -1898,11 +2004,17 @@ def api_convert():
             step=0,
             step_total=packaging_steps,
         )
+        append_job(f"Game:   {game_label} ({game_root})")
         append_job(f"Input:  {elf}")
         append_job(f"Module: {mod}")
         if extra_module_dirs:
             append_job(f"Extra modules: {', '.join(extra_module_dirs)}")
         append_job(f"Output: {out_exe}")
+        with _job_lock:
+            hist_path = str(_job.get("logHistoryPath") or "")
+        append_job(f"Convert log (send this): {hist_path}")
+        if game_log:
+            append_job(f"Copy beside game:       {game_log}")
         append_job("> " + " ".join(args))
         append_job("")
         append_job(
@@ -1911,6 +2023,7 @@ def api_convert():
             "'=== done ==='."
         )
         ok = True
+        self_skips: list[str] = []
         try:
             proc = subprocess.Popen(
                 args,
@@ -1928,6 +2041,8 @@ def api_convert():
                 text = line.rstrip()
                 append_job(text)
                 low = text.lower()
+                if "skipping self container" in low:
+                    self_skips.append(text.strip())
                 if "conversion complete" in low or "write output" in low:
                     set_job_progress(
                         phase="relinker",
@@ -1940,6 +2055,15 @@ def api_convert():
                 append_job("ERROR: exit code from relinker (see output above)")
                 append_job("Relinker failed.")
             else:
+                if self_skips:
+                    append_job("")
+                    append_job(
+                        "[WARN] Relinker skipped SELF-wrapped module(s) "
+                        f"({len(self_skips)}). Unwrap them before Convert or guest "
+                        "modules will be missing (Converted modules: 0)."
+                    )
+                    for s in self_skips:
+                        append_job(f"  {s}")
                 append_job("")
                 append_job("=" * 60)
                 append_job("Relinker finished converting the binary.")
@@ -1959,15 +2083,32 @@ def api_convert():
                     step=1,
                     step_total=packaging_steps,
                 )
+                libs_src = get_libs_dir()
                 libs_dest = output_dir / "libs"
                 libs_dest.mkdir(parents=True, exist_ok=True)
-                prx_list = list(get_libs_dir().glob("*.prx"))
+                prx_list = sorted(libs_src.glob("*.prx"), key=lambda p: p.name.lower())
+                # Also note non-.prx files present in the build libs folder (not copied)
+                other_in_libs = sorted(
+                    p.name
+                    for p in libs_src.iterdir()
+                    if p.is_file() and p.suffix.lower() != ".prx"
+                )
+                append_job(f"[1/4] System libs source: {libs_src}")
+                append_job(f"[1/4] System libs dest:   {libs_dest}")
+                if other_in_libs:
+                    append_job(
+                        "[1/4] Non-.prx files in build libs (NOT copied — AnyPS5 docs "
+                        f"only require *.prx here): {', '.join(other_in_libs)}"
+                    )
+                append_job(f"[1/4] Packaging file list — system .prx ({len(prx_list)}):")
                 count = 0
                 total_prx = max(len(prx_list), 1)
                 for prx in prx_list:
                     dest = libs_dest / prx.name
-                    dest.write_bytes(prx.read_bytes())
+                    data = prx.read_bytes()
+                    dest.write_bytes(data)
                     count += 1
+                    append_job(f"  COPY  {prx.name}  →  libs\\{prx.name}  ({len(data)} bytes)")
                     if count == 1 or count == total_prx or count % 20 == 0:
                         pct = 52 + (10 * count / total_prx)
                         set_job_progress(
@@ -2012,12 +2153,15 @@ def api_convert():
                             f"({files_so_far} files copied so far)"
                         )
 
-                res_files, res_dirs, skipped = copy_game_resources_to_app0(
+                res_files, res_dirs, skipped, res_manifest = copy_game_resources_to_app0(
                     content_root,
                     app0,
                     output_dir=output_dir,
                     on_progress=_res_progress,
                 )
+                append_job("[2/4] Packaging file list — top-level game items:")
+                for line in res_manifest:
+                    append_job(f"  {line}")
                 append_job(
                     f"[2/4] Copied game resources into {app0} "
                     f"({res_dirs} folder(s), {res_files} file(s); "
@@ -2066,15 +2210,46 @@ def api_convert():
                     "[3/4] Copying MinGW runtime DLLs (required — without these, "
                     "launch fails with GetLastError 126)…"
                 )
+                mingw_sources = find_mingw_runtime_sources()
+                append_job("[3/4] MinGW DLL sources resolved:")
+                for name in MINGW_RUNTIME_DLLS:
+                    src = mingw_sources.get(name)
+                    if src:
+                        try:
+                            sz = src.stat().st_size
+                        except OSError:
+                            sz = 0
+                        append_job(f"  SRC   {name}  ←  {src}  ({sz} bytes)")
+                    else:
+                        append_job(f"  MISSING SOURCE  {name}")
                 dests = mingw_destinations_for_output(output_dir)
-                dll_n, dll_missing, dll_srcs = copy_mingw_runtime_dlls(*dests)
+                append_job(
+                    f"[3/4] MinGW copy destinations ({len(dests)}): "
+                    + "; ".join(str(d) for d in dests)
+                )
+                dll_n, dll_missing, dll_srcs, dll_details = copy_mingw_runtime_dlls(*dests)
+                append_job("[3/4] Packaging file list — MinGW runtime DLLs:")
+                for name, dest, size, copied_ok in dll_details:
+                    status = "OK" if copied_ok else "FAIL"
+                    append_job(f"  {status}  {name}  →  {dest}  ({size} bytes)")
                 if dll_n:
                     append_job(
-                        f"[3/4] Copied MinGW runtime DLL(s) ×{dll_n} into "
-                        f"{', '.join(str(d) for d in dests)} "
-                        f"({', '.join(MINGW_RUNTIME_DLLS)}; from {dll_srcs[0] if dll_srcs else '?'})"
+                        f"[3/4] Copied MinGW runtime DLL(s) ×{dll_n} "
+                        f"({', '.join(MINGW_RUNTIME_DLLS)}; "
+                        f"from {dll_srcs[0] if dll_srcs else '?'})"
                     )
                 still_missing = verify_mingw_in_libs(libs_dest)
+                append_job("[3/4] Post-copy verify (libs\\ must have all three):")
+                for name in MINGW_RUNTIME_DLLS:
+                    p = libs_dest / name
+                    if p.is_file():
+                        try:
+                            sz = p.stat().st_size
+                        except OSError:
+                            sz = 0
+                        append_job(f"  VERIFY OK  libs\\{name}  ({sz} bytes)")
+                    else:
+                        append_job(f"  VERIFY MISSING  libs\\{name}")
                 if still_missing or dll_missing:
                     ok = False
                     append_job(
@@ -2128,8 +2303,34 @@ def api_convert():
                     step=4,
                     step_total=packaging_steps,
                 )
+                append_job("")
+                append_job("=" * 60)
+                append_job("PACKAGING MANIFEST SUMMARY")
+                append_job(f"  Game label:     {game_label}")
+                append_job(f"  System .prx:    {count} → {libs_dest}")
+                append_job(f"  Game resources: {res_files} file(s), {res_dirs} folder(s) → {app0}")
+                append_job(f"  MinGW DLLs:     {dll_n} file write(s) across {len(dests)} folder(s)")
+                append_job(
+                    f"  Required MinGW: {', '.join(MINGW_RUNTIME_DLLS)} "
+                    + (
+                        "ALL PRESENT in libs\\"
+                        if not still_missing
+                        else f"MISSING: {', '.join(still_missing)}"
+                    )
+                )
+                with _job_lock:
+                    hist_final = str(_job.get("logHistoryPath") or "")
+                    game_final = str(_job.get("logGamePath") or "")
+                append_job(f"  Convert log:    {hist_final}")
+                if game_final:
+                    append_job(f"  Beside game:    {game_final}")
+                append_job("=" * 60)
                 append_job(f"Done: {out_exe}")
                 append_job("You can start the game now (Start game / the .exe).")
+                append_job(
+                    f"If launch fails: send convert log `{Path(hist_final).name}` "
+                    "(or the convert-*.log next to the game exe)."
+                )
         except Exception as e:
             ok = False
             append_job(f"ERROR: {e}")
