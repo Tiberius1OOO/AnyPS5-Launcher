@@ -667,6 +667,18 @@ select option { background: #0d1219; }
 .setup-progress-bar.transfer .setup-progress-fill {
   background: linear-gradient(90deg, #22d3ee, #3b82f6);
 }
+/* Unknown % — gentle sweep instead of a fake stuck 15% */
+.setup-progress-fill.indeterminate {
+  width: 35% !important;
+  transition: none;
+  background: linear-gradient(90deg, transparent, #22d3ee, #22c55e, transparent);
+  background-size: 200% 100%;
+  animation: progress-indeterminate 1.2s ease-in-out infinite;
+}
+@keyframes progress-indeterminate {
+  0% { transform: translateX(-120%); }
+  100% { transform: translateX(320%); }
+}
 .setup-transfer {
   margin-top: 0.65rem;
   padding-top: 0.55rem;

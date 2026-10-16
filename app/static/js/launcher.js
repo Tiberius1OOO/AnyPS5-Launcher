@@ -428,6 +428,17 @@
     }
   }
 
+  function applyBarFill(fill, pct) {
+    if (!fill) return;
+    const known = pct != null && !Number.isNaN(Number(pct));
+    fill.classList.toggle("indeterminate", !known);
+    if (known) {
+      fill.style.width = `${Math.max(0, Math.min(100, Number(pct)))}%`;
+    } else {
+      fill.style.width = "";
+    }
+  }
+
   function renderJobProgress(job) {
     const wrap = $("jobProgressWrap");
     const label = $("jobProgressLabel");
@@ -453,20 +464,58 @@
         : (running ? "…" : "");
     }
     if (detail) detail.textContent = (job && job.progressDetail) || "";
-    if (fill) fill.style.width = pct != null && !Number.isNaN(pct) ? `${Math.max(0, Math.min(100, pct))}%` : "15%";
+    applyBarFill(fill, pct);
+  }
+
+  async function enrichJobWithSetupProgress(job) {
+    // Setup has its own progress API; mirror it into the Console bar so it is not stuck.
+    if (!job || !job.running) return job;
+    const kind = String(job.kind || "");
+    if (!/setup/i.test(kind)) return job;
+    try {
+      const data = await api("/api/setup/progress");
+      const p = data && data.progress;
+      if (!p) return job;
+      const steps = p.steps || [];
+      const total = p.total || steps.length || 0;
+      const done = p.done || 0;
+      const cur = steps.find((s) => s.status === "running");
+      const transfer = p.transfer || null;
+      let pct = total > 0 ? (done / total) * 100 : null;
+      if (transfer && transfer.percent != null && total > 0) {
+        // Blend in-step download/clone % into the overall step slice
+        const slice = 100 / total;
+        pct = Math.min(99, done * slice + (Number(transfer.percent) / 100) * slice);
+      }
+      const phaseBits = [];
+      if (cur) phaseBits.push(cur.name);
+      if (transfer && transfer.phase) phaseBits.push(transfer.phase);
+      job.phaseLabel = phaseBits.length
+        ? `Setup ${done}/${total}: ${phaseBits.join(" — ")}`
+        : `Setup ${done}/${total}`;
+      job.progress = pct;
+      job.progressDetail = (transfer && transfer.label)
+        || (transfer && transfer.received
+          ? `${transfer.received}${transfer.total ? " / " + transfer.total : ""}${transfer.speed ? " · " + transfer.speed : ""}`
+          : "")
+        || (p.detail || "");
+    } catch (_) {}
+    return job;
   }
 
   async function pollJobOnce() {
-    const job = await api("/api/job");
+    let job = await api("/api/job");
+    job = await enrichJobWithSetupProgress(job);
     const lines = job.lines || [];
     $("console").textContent = lines.length ? lines.join("\n") : ($("console").textContent || "...");
     $("console").scrollTop = $("console").scrollHeight;
     lastLineCount = lines.length;
     renderJobProgress(job);
     if (job.running) {
+      const pctBit = job.progress != null ? ` ${Math.round(job.progress)}%` : "";
       const bit = job.phaseLabel
-        || (job.progress != null ? `${job.kind || "Job"} ${Math.round(job.progress)}%` : null)
-        || `Running: ${job.kind || "Job"}`;
+        ? `${job.phaseLabel}${job.phaseLabel.includes("%") ? "" : pctBit}`
+        : `Running: ${job.kind || "Job"}${pctBit}`;
       $("jobStatus").textContent = bit;
     } else {
       $("jobStatus").textContent =
@@ -631,11 +680,14 @@
 
     wrap.hidden = false;
     if (label) label.textContent = `${done} / ${total}`;
+    // Overall line = which install step. Transfer block below = live clone/download detail.
+    // Never copy transfer.label into both places (that showed the same path twice).
     if (detail) {
       const cur = steps.find((s) => s.status === "running");
-      if (progress.running && transfer && transfer.label) detail.textContent = transfer.label;
-      else if (progress.running && cur) detail.textContent = `Installing: ${cur.name}…`;
-      else if (progress.detail) detail.textContent = progress.detail;
+      if (progress.running && cur) {
+        const bite = transfer && transfer.phase ? ` — ${transfer.phase}` : "";
+        detail.textContent = `Installing: ${cur.name}${bite}`;
+      } else if (progress.detail) detail.textContent = progress.detail;
       else if (progress.ok === false) detail.textContent = "Failed. See Console";
       else if (progress.ok === true) detail.textContent = "Everything detected / install finished";
       else detail.textContent = "Checking this PC…";
@@ -653,15 +705,22 @@
         if (tPct) tPct.textContent = pct != null ? `${Math.round(pct)}%` : "…";
         if (tDetail) {
           const bits = [];
+          if (transfer.label) bits.push(transfer.label);
           if (transfer.received && transfer.total) bits.push(`${transfer.received} / ${transfer.total}`);
           else if (transfer.received) bits.push(transfer.received);
           if (transfer.speed) bits.push(transfer.speed);
-          tDetail.textContent = bits.join(" · ") || (transfer.label || "");
+          // If label already is the only content and equals phase, show nothing extra
+          const joined = bits.join(" · ");
+          tDetail.textContent =
+            joined && joined !== (transfer.phase || "") ? joined : "";
         }
-        if (tFill) tFill.style.width = pct != null ? `${pct}%` : "15%";
+        applyBarFill(tFill, pct);
       } else {
         tWrap.hidden = true;
-        if (tFill) tFill.style.width = "0%";
+        if (tFill) {
+          tFill.classList.remove("indeterminate");
+          tFill.style.width = "0%";
+        }
       }
     }
 

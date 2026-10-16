@@ -99,7 +99,12 @@ def set_transfer(
     label: str = "",
     step_id: str | None = None,
 ) -> None:
-    """Update live download/clone transfer stats for the UI."""
+    """Update live download/clone transfer stats for the UI.
+
+    phase  = short status for the transfer header (e.g. Cloning, Receiving objects)
+    label  = optional longer path/message shown once under the transfer bar
+    detail = compact summary for the step list (not duplicated as the overall status line)
+    """
     detail_parts = []
     if phase:
         detail_parts.append(phase)
@@ -118,8 +123,8 @@ def set_transfer(
             "speed": speed,
             "received": received,
             "total": total,
-            "phase": phase,
-            "label": label or detail,
+            "phase": phase or "Transfer",
+            "label": label,  # path only when provided — never reinvent from detail
         }
         _progress["detail"] = detail
         sid = step_id or _progress.get("current") or ""
@@ -543,8 +548,25 @@ def _parse_git_progress_line(line: str) -> dict | None:
             "total": total,
             "speed": (speed or "").strip(),
         }
-    if "Cloning into" in s or "Submodule" in s:
-        return {"percent": None, "phase": s[:120], "received": "", "total": "", "speed": ""}
+    if "Cloning into" in s:
+        # Keep phase short for the UI; full path goes in label (avoid duplicating the same line twice)
+        return {
+            "percent": None,
+            "phase": "Cloning",
+            "received": "",
+            "total": "",
+            "speed": "",
+            "label": s[:200],
+        }
+    if s.startswith("Submodule ") or "Submodule path" in s:
+        return {
+            "percent": None,
+            "phase": "Submodule",
+            "received": "",
+            "total": "",
+            "speed": "",
+            "label": s[:200],
+        }
     return None
 
 

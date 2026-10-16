@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -644,6 +645,51 @@ def set_job_progress(
             _job["stepTotal"] = int(step_total)
 
 
+_NINJA_PROG_RE = re.compile(r"\[(\d+)\s*/\s*(\d+)\]")
+
+
+def parse_ninja_progress(line: str) -> tuple[int, int] | None:
+    """Parse Ninja/CMake build lines like '[373/431] Building …'."""
+    m = _NINJA_PROG_RE.search(line or "")
+    if not m:
+        return None
+    cur, total = int(m.group(1)), int(m.group(2))
+    if total <= 0 or cur < 0:
+        return None
+    return min(cur, total), total
+
+
+def _command_progress_label(cmd: list[str]) -> str:
+    """Short human label for a build/update command (UI only)."""
+    if not cmd:
+        return "Command"
+    low = [str(c).lower() for c in cmd]
+    joined = " ".join(low)
+    if "cmake" in low and "-s" in low:
+        return "CMake configure"
+    if "cmake" in low and "--build" in low:
+        if "--target" in low:
+            try:
+                t = cmd[low.index("--target") + 1]
+            except (ValueError, IndexError):
+                t = "target"
+            return f"Build target: {t}"
+        return "Build (compile)"
+    if "git" in low and "pull" in low:
+        return "git pull"
+    if "git" in low and "fetch" in low:
+        return "git fetch"
+    if "git" in low and "submodule" in joined:
+        return "git submodule"
+    # Truncate long paths in the display
+    parts = []
+    for c in cmd[:6]:
+        s = str(c)
+        parts.append(s if len(s) < 40 else ("…" + s[-36:]))
+    more = " …" if len(cmd) > 6 else ""
+    return " ".join(parts) + more
+
+
 def _path_is_under(child: Path, parent: Path) -> bool:
     try:
         child.resolve().relative_to(parent.resolve())
@@ -727,15 +773,37 @@ def run_job(
             append_job(line)
         ok = True
         workdir = str(cwd or get_repo_root())
-        for cmd in commands:
+        n_cmds = max(len(commands), 1)
+        set_job_progress(
+            phase="job",
+            label=f"{kind}: starting…",
+            percent=0,
+            detail=f"{n_cmds} command(s)",
+            step=0,
+            step_total=n_cmds,
+        )
+        for cmd_i, cmd in enumerate(commands):
+            slice_lo = 100.0 * cmd_i / n_cmds
+            slice_hi = 100.0 * (cmd_i + 1) / n_cmds
+            cmd_label = _command_progress_label(cmd)
             attempts = 1 + max(0, int(retries_per_command or 0))
             for attempt in range(1, attempts + 1):
                 if attempt > 1:
                     append_job(f"Retrying command ({attempt}/{attempts})…")
                 append_job("> " + " ".join(cmd))
+                set_job_progress(
+                    phase="job",
+                    label=f"Step {cmd_i + 1}/{n_cmds}: {cmd_label}",
+                    percent=slice_lo,
+                    detail="starting…",
+                    step=cmd_i + 1,
+                    step_total=n_cmds,
+                )
                 mark = 0
                 with _job_lock:
                     mark = len(_job["lines"])
+                last_sent_pct = -1
+                cmake_ticks = 0
                 try:
                     proc = subprocess.Popen(
                         cmd,
@@ -750,9 +818,56 @@ def run_job(
                     )
                     assert proc.stdout is not None
                     for line in proc.stdout:
-                        append_job(line.rstrip())
+                        text = line.rstrip()
+                        append_job(text)
+                        # Drive the Console progress bar from Ninja [n/m] when present.
+                        # Throttle UI updates to whole percent points — keeps Waitress stable.
+                        try:
+                            parsed = parse_ninja_progress(text)
+                            if parsed:
+                                cur, tot = parsed
+                                within = cur / tot
+                                overall = slice_lo + (slice_hi - slice_lo) * within
+                                ipct = int(overall)
+                                if ipct != last_sent_pct:
+                                    last_sent_pct = ipct
+                                    after = text.split("]", 1)[-1].strip()
+                                    set_job_progress(
+                                        phase="job",
+                                        label=f"Step {cmd_i + 1}/{n_cmds}: {cmd_label}",
+                                        percent=overall,
+                                        detail=f"[{cur}/{tot}] {after[:100]}",
+                                        step=cmd_i + 1,
+                                        step_total=n_cmds,
+                                    )
+                            elif text.startswith("--"):
+                                # CMake configure has no [n/m]; ease within this step only.
+                                cmake_ticks += 1
+                                within = min(0.92, 0.08 + 0.84 * (1.0 - (0.97 ** cmake_ticks)))
+                                overall = slice_lo + (slice_hi - slice_lo) * within
+                                ipct = int(overall)
+                                if ipct != last_sent_pct:
+                                    last_sent_pct = ipct
+                                    set_job_progress(
+                                        phase="job",
+                                        label=f"Step {cmd_i + 1}/{n_cmds}: {cmd_label}",
+                                        percent=overall,
+                                        detail=text[:120],
+                                        step=cmd_i + 1,
+                                        step_total=n_cmds,
+                                    )
+                        except Exception:
+                            pass  # progress is cosmetic — never fail the build on UI updates
                     code = proc.wait()
                     if code == 0:
+                        set_job_progress(
+                            phase="job",
+                            label=f"Step {cmd_i + 1}/{n_cmds}: {cmd_label}",
+                            percent=slice_hi,
+                            detail="step done",
+                            step=cmd_i + 1,
+                            step_total=n_cmds,
+                        )
                         break
                     append_job(f"ERROR: exit code {code} ({' '.join(cmd)})")
                     with _job_lock:
