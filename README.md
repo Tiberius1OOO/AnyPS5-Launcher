@@ -1,6 +1,6 @@
 # AnyPS5 Launcher
 
-Windows desktop launcher for **[AnyPS5](https://github.com/boykopovar/AnyPS5)** — convert dumped PS5 game folders into a Windows `.exe` and run them locally.
+Windows desktop launcher for **[AnyPS5](https://github.com/boykopovar/AnyPS5)**. Convert dumped PS5 game folders into a Windows `.exe` and run them locally.
 
 This repo is the **launcher only**. It installs tools, clones AnyPS5 next to the app, builds the converter, manages a game library, converts titles, and starts them from a local UI.
 
@@ -40,9 +40,9 @@ Your game shelf. Converted titles show a **Play** badge; dumps show **Convert**.
 |---------|----------------|
 | Cover grid | Local art from `anyps5-art/` (and online cover download when scanning) |
 | Hover backdrop | Soft background art while you move across cards |
-| Instant load | Saves `library-cache.json` — next start is immediate (quick “still there?” check) |
+| Instant load | Saves `library-cache.json` so the next start is immediate (quick "still there?" check) |
 | First time scan | Only when folders are set and nothing has been scanned yet |
-| Scan button | **Scan for newly added games and download cover art** — adds new folders only; skips games that already have covers |
+| Scan button | **Scan for newly added games and download cover art**. Adds new folders only; skips games that already have covers |
 | Folder sizes | Totals next to Converted / Unconverted after sizes are known |
 
 Click a converted card to **Play** (locks the UI while the game runs). Click an unconverted card to jump to **Convert** with paths prefilled.
@@ -57,7 +57,7 @@ Turn a dump into a Windows build.
 
 | Field | Purpose |
 |-------|---------|
-| Game folder | Decrypted PS5 dump (`eboot.bin` / `.elf`, modules, `sce_sys`, …) |
+| Game folder | Decrypted PS5 dump (`eboot.bin` / `.elf`, modules, `sce_sys`, etc.) |
 | Output folder | Usually `ConvertedRoot\GameName` (created from Library) |
 | Output name | `.exe` name (e.g. `Demons_Souls.exe`) |
 | GPU name filter | Optional substring so the title picks a specific GPU |
@@ -74,9 +74,9 @@ Turn a dump into a Windows build.
 
 Compile AnyPS5 (converter + system libs) after Setup or after Updates.
 
-- Status cards: Converter, System libs, Compiler, Build tools  
-- **Build now** — full CMake / Ninja rebuild  
-- **Mark as up to date** — if you built outside the launcher  
+- Status cards: Converter, System libs, Compiler, Build tools
+- **Build now**: full CMake / Ninja rebuild
+- **Mark as up to date**: if you built outside the launcher
 
 Header chips show whether the build matches the current AnyPS5 commit.
 
@@ -88,10 +88,10 @@ Header chips show whether the build matches the current AnyPS5 commit.
 
 Pull new AnyPS5 commits from GitHub.
 
-- **Check now** — fetch pending changes  
-- **Download updates** — git pull into `<launcher>\AnyPS5`  
-- Lists of available updates and recent history  
-- After a pull, run **Build** again when the banner says the build is outdated  
+- **Check now**: fetch pending changes
+- **Download updates**: git pull into `<launcher>\AnyPS5`
+- Lists of available updates and recent history
+- After a pull, run **Build** again when the banner says the build is outdated
 
 ---
 
@@ -104,7 +104,7 @@ Pull new AnyPS5 commits from GitHub.
 | Library folders | Unconverted + Converted roots (required for Library) |
 | Logging | Log level → `logs\launcher.log` |
 | Converter defaults | Output name, GPU filter, cleanup, Intel, convert GUI flag |
-| Hide game console when playing | **Off by default** — shows a separate console with live game output. Turn on to hide it (output goes to `logs\game-*.log`) |
+| Hide game console when playing | **Off by default**. Shows a separate console with live game output. Turn on to hide it (output goes to `logs\game-*.log`) |
 | Controls | Keyboard / mouse remapping (controllers work automatically) |
 
 Settings autosave when you change values.
@@ -117,9 +117,9 @@ Settings autosave when you change values.
 
 One-time (or repair) environment install.
 
-- Progress bar and install steps (Git, Python, CMake, Ninja, WinLibs GCC, clone AnyPS5, submodules, …)  
-- PC checklist  
-- **Install / repair everything**, **Re-check**, **Run as admin** when a tool needs elevation  
+- Progress bar and install steps (Git, Python, CMake, Ninja, WinLibs GCC, clone AnyPS5, submodules, etc.)
+- PC checklist
+- **Install / repair everything**, **Re-check**, **Run as admin** when a tool needs elevation
 
 AnyPS5 is always cloned to `<launcher-folder>\AnyPS5`.
 
@@ -137,9 +137,9 @@ Shows the live upstream AnyPS5 readme from GitHub (Reload / Open on GitHub). Thi
 
 Live log for Setup, Updates, Build, and Convert.
 
-- **Open log file** — current job log under `logs\`  
-- **Clear** — clear the on-screen view  
-- Per-game convert logs: `logs\convert-<game>-<timestamp>.log`  
+- **Open log file**: current job log under `logs\`
+- **Clear**: clear the on-screen view
+- Per-game convert logs: `logs\convert-<game>-<timestamp>.log`
 
 ---
 
@@ -147,9 +147,9 @@ Live log for Setup, Updates, Build, and Convert.
 
 ![Game running](docs/screenshots/game-running.png)
 
-1. Open **Library** → click a converted title.  
-2. A lock overlay appears with a spinner while runtimes are prepared (**Starting…**), then shows the PID when the process is up.  
-3. By default a **separate game console** shows init / compile output. Hide it in **Settings** if you prefer.  
+1. Open **Library** → click a converted title.
+2. A lock overlay appears with a spinner while runtimes are prepared (**Starting...**), then shows the PID when the process is up.
+3. By default a **separate game console** shows init / compile output. Hide it in **Settings** if you prefer.
 4. Close the game (or **Force stop**) to unlock the launcher. Only one game can run at a time.
 
 ---
@@ -158,17 +158,17 @@ Live log for Setup, Updates, Build, and Convert.
 
 ### What the game folder needs
 
-- Entry binary such as `eboot.bin` or another `.elf`  
-- Modules (`sce_module` / `sce_modules`, and engine folders like Unity `Media/Modules`)  
-- Usual dump layout (`sce_sys`, title content, …)  
+- Entry binary such as `eboot.bin` or another `.elf`
+- Modules (`sce_module` / `sce_modules`, and engine folders like Unity `Media/Modules`)
+- Usual dump layout (`sce_sys`, title content, etc.)
 
 ### What Convert does
 
-- Runs the AnyPS5 relinker with your options  
-- Passes extra `--module-dir` paths when needed  
-- Copies system `.prx` libs and MinGW runtime DLLs next to the `.exe` / under `libs` and `app0`  
-- Copies title resources into `app0/`  
-- **Start game** re-checks MinGW DLLs if an older convert is missing them  
+- Runs the AnyPS5 relinker with your options
+- Passes extra `--module-dir` paths when needed
+- Copies system `.prx` libs and MinGW runtime DLLs next to the `.exe` / under `libs` and `app0`
+- Copies title resources into `app0/`
+- **Start game** re-checks MinGW DLLs if an older convert is missing them
 
 ---
 
@@ -206,15 +206,15 @@ Output: `dist\release\AnyPS5-Launcher\` and `AnyPS5-Launcher-windows.zip`.
 
 ### v1.4.0
 
-- Documented README with screenshots for each main tab  
-- Library cache: instant load, first-time scan only once, incremental Scan button  
-- Play lock: spinner + “Starting…” while the process is prepared; PID when running  
-- Settings: **Hide game console when playing** (default off — console visible)  
-- Single-instance game launch; game logs under `logs\game-*.log` when console is hidden  
+- Documented README with screenshots for each main tab
+- Library cache: instant load, first-time scan only once, incremental Scan button
+- Play lock: spinner + "Starting..." while the process is prepared; PID when running
+- Settings: **Hide game console when playing** (default off, console visible)
+- Single-instance game launch; game logs under `logs\game-*.log` when console is hidden
 
 ### v1.3.x
 
-- Library tab, portable art/meta, Settings folders, convert chime, cover download  
+- Library tab, portable art/meta, Settings folders, convert chime, cover download
 
 ---
 
