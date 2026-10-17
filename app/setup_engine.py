@@ -520,13 +520,17 @@ def run(
 
 
 def _parse_git_progress_line(line: str) -> dict | None:
-    """Parse git --progress stderr into transfer fields."""
+    """Parse git --progress stderr into transfer fields.
+
+    Git prints object counts as (recv/total) and optional byte size separately, e.g.:
+      Receiving objects:  25% (24449/96908), 11.63 MiB | 2.38 MiB/s
+    Never treat the object total as a byte total (UI used to show \"11.63 MiB / 96908\").
+    """
     import re
 
     s = (line or "").strip().rstrip("\r")
     if not s:
         return None
-    # Receiving objects:  45% (1234/2742), 12.34 MiB | 2.10 MiB/s
     m = re.search(
         r"(Receiving objects|Resolving deltas|Remote:\s*Compressing objects|"
         r"Updating files|Checking out files|Filtering content)\s*:\s*(\d+)%"
@@ -536,23 +540,43 @@ def _parse_git_progress_line(line: str) -> dict | None:
     )
     if m:
         phase, pct, counts, size, speed = m.groups()
-        received = ""
-        total = ""
+        obj_recv = ""
+        obj_total = ""
         if counts and "/" in counts:
-            received, total = [x.strip() for x in counts.split("/", 1)]
+            obj_recv, obj_total = [x.strip() for x in counts.split("/", 1)]
         size = (size or "").strip().rstrip(",")
+        speed = (speed or "").strip()
+        phase_clean = phase.replace("Remote:", "").strip()
+        if size:
+            # Byte transfer: show MiB only; keep object counts in the phase label
+            phase_out = (
+                f"{phase_clean} ({obj_recv}/{obj_total})"
+                if obj_recv and obj_total
+                else phase_clean
+            )
+            return {
+                "percent": float(pct),
+                "phase": phase_out,
+                "received": size,
+                "total": "",
+                "speed": speed,
+            }
         return {
             "percent": float(pct),
-            "phase": phase.replace("Remote:", "").strip(),
-            "received": size or received,
-            "total": total,
-            "speed": (speed or "").strip(),
+            "phase": phase_clean,
+            "received": obj_recv,
+            "total": obj_total,
+            "speed": speed,
         }
     if "Cloning into" in s:
-        # Keep phase short for the UI; full path goes in label (avoid duplicating the same line twice)
+        # Short name for phase; full path in label (avoid duplicating the same line twice)
+        name = ""
+        cm = re.search(r"Cloning into ['\"]([^'\"]+)['\"]", s)
+        if cm:
+            name = Path(cm.group(1)).name
         return {
             "percent": None,
-            "phase": "Cloning",
+            "phase": f"Cloning {name}" if name else "Cloning",
             "received": "",
             "total": "",
             "speed": "",
@@ -1371,22 +1395,120 @@ def ensure_repo(repo_root: Path, log: LogFn) -> bool:
     return code == 0 and (repo_root / ".git").exists()
 
 
+def _gitmodules_paths(repo_root: Path) -> list[str]:
+    gitmodules = repo_root / ".gitmodules"
+    if not gitmodules.is_file():
+        return []
+    paths: list[str] = []
+    for line in gitmodules.read_text(encoding="utf-8", errors="replace").splitlines():
+        stripped = line.strip()
+        if not stripped.lower().startswith("path"):
+            continue
+        _, _, val = stripped.partition("=")
+        rel = val.strip()
+        if rel:
+            paths.append(rel)
+    return paths
+
+
+def _submodule_git_ok(worktree: Path) -> bool:
+    if not worktree.exists():
+        return False
+    try:
+        r = subprocess.run(
+            ["git", "-C", str(worktree), "rev-parse", "--git-dir"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            shell=False,
+        )
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
+def _cleanup_broken_submodules(repo_root: Path, log: LogFn) -> None:
+    """Remove half-cloned submodule worktrees so a retry can start clean."""
+    for rel in _gitmodules_paths(repo_root):
+        work = repo_root / rel
+        if _submodule_git_ok(work):
+            continue
+        # Empty / missing is fine — only clean leftovers that block git
+        mod = repo_root / ".git" / "modules" / rel
+        if not work.exists() and not mod.exists():
+            continue
+        _log(log, f"  [FIX] Cleaning broken submodule: {rel}")
+        try:
+            subprocess.run(
+                ["git", "submodule", "deinit", "-f", "--", rel],
+                cwd=str(repo_root),
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                shell=False,
+            )
+        except Exception:
+            pass
+        if work.exists():
+            shutil.rmtree(work, ignore_errors=True)
+        if mod.exists():
+            shutil.rmtree(mod, ignore_errors=True)
+
+
 def ensure_submodules(repo_root: Path, log: LogFn) -> bool:
     if not (repo_root / ".gitmodules").is_file():
         _log(log, "[ABBRUCH] .gitmodules fehlt")
         return False
-    _log(log, "==> git submodule update --init --recursive")
     env = tool_env()
-    set_transfer(step_id="submodules", phase="Updating submodules", percent=0)
-    code, _ = run_streaming(
-        ["git", "submodule", "update", "--init", "--recursive", "--progress"],
-        cwd=repo_root,
-        log=log,
-        timeout=1800,
-        env=env,
-        step_id="submodules",
-    )
-    return code == 0
+    max_attempts = 3
+    last_code = 1
+    for attempt in range(1, max_attempts + 1):
+        if attempt > 1:
+            _log(log, f"==> Retry git submodule update ({attempt}/{max_attempts})")
+            _cleanup_broken_submodules(repo_root, log)
+        else:
+            _log(log, "==> git submodule update --init --recursive")
+            # Stale half-clones from a previous crash also block the first try
+            _cleanup_broken_submodules(repo_root, log)
+        set_transfer(step_id="submodules", phase="Updating submodules", percent=0)
+        last_code, out = run_streaming(
+            ["git", "submodule", "update", "--init", "--recursive", "--progress"],
+            cwd=repo_root,
+            log=log,
+            timeout=1800,
+            env=env,
+            step_id="submodules",
+        )
+        if last_code == 0:
+            return True
+        blob = (out or "").lower()
+        transient = any(
+            tip in blob
+            for tip in (
+                "disconnect",
+                "index-pack",
+                "early eof",
+                "rpc failed",
+                "connection reset",
+                "tls",
+                "timed out",
+                "http/2",
+            )
+        ) or last_code in (128, 3221225786)
+        if attempt < max_attempts and transient:
+            _log(
+                log,
+                f"  [WARN] Submodule fetch interrupted (exit {last_code}) — "
+                "cleaning and retrying…",
+            )
+            continue
+        _log(log, f"  [ABBRUCH] Submodule update failed (exit {last_code})")
+        break
+    return False
 
 
 def ensure_flask(repo_root: Path, log: LogFn) -> bool:

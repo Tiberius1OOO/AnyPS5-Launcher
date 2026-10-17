@@ -4,7 +4,7 @@ Windows desktop launcher for **[AnyPS5](https://github.com/boykopovar/AnyPS5)** 
 
 This repo is the **launcher only**. It does not fork or patch upstream AnyPS5. It installs the tools, clones the project next to the app, builds it, converts games, and starts them from a local browser UI.
 
-**Current release:** [v1.2.8](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
+**Current release:** [v1.2.9](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
 
 ---
 
@@ -114,9 +114,9 @@ Folder names with spaces (e.g. `C:\Games\My Title\...`) are supported. Deep inst
 | Ninja | Fast build backend |
 | WinLibs GCC | Default extract under `C:\winlibs` |
 | Clone AnyPS5 | `<launcher>\AnyPS5` from [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5) |
-| Submodules | `git submodule update --init --recursive` |
+| Submodules | `git submodule update --init --recursive` (v1.2.9+ retries after network drops and cleans half-clones) |
 
-On Setup: **ok** = present, **next** = still required. Use **Console** if something fails — useful compiler/CMake lines sit above `ERROR: exit code …`.
+On Setup: **ok** = present, **next** = still required. Use **Console** if something fails. Useful compiler/CMake lines sit above `ERROR: exit code …`.
 
 ---
 
@@ -154,8 +154,26 @@ Output: `dist\release\AnyPS5-Launcher\` and `AnyPS5-Launcher-windows.zip`.
 
 ---
 
+## Changelog (launcher)
+
+### v1.2.9
+
+- Setup submodules: up to 3 retries after a failed fetch, with cleanup of broken half-clones
+- Setup transfer UI: real byte sizes and speed (object counts no longer look like huge MiB totals)
+- Setup transfer UI: shows which submodule is cloning
+
+### v1.2.8
+
+- Convert packaging: live copy speed and busy progress animation
+
+### v1.2.7
+
+- Convert: per-game logs with full packaging file manifests
+
+---
+
 ## License
 
-MIT — see [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE).
 
 AnyPS5 itself remains under its own terms: [boykopovar/AnyPS5](https://github.com/boykopovar/AnyPS5).
