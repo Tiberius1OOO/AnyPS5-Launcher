@@ -40,6 +40,12 @@ INPUT_PROFILE_PATH = DATA_DIR / "input-profile.json"
 LOGS_DIR = DATA_DIR / "logs"
 LAST_JOB_LOG = LOGS_DIR / "last-job.log"
 
+import applog  # noqa: E402
+import library as library_mod  # noqa: E402
+
+applog.configure(LOGS_DIR)
+library_mod.configure_cache(DATA_DIR)
+
 
 def _is_anyps5_tree(path: Path) -> bool:
     try:
@@ -160,7 +166,11 @@ def _default_config() -> dict:
         "gpuFilter": "",
         "toIntel": False,
         "windowsGui": False,
+        "hideGameConsole": False,
         "unusedFilter": "0",
+        "unconvertedGamesRoot": "",
+        "convertedGamesRoot": "",
+        "logLevel": "info",
         "lastBuildCommit": "",
         "lastBuildCommitShort": "",
         "lastBuildAt": "",
@@ -175,10 +185,17 @@ def load_config() -> dict:
             cfg.update(json.loads(CONFIG_PATH.read_text(encoding="utf-8")))
         except Exception:
             pass
+    # Keep file logger in sync with saved preference
+    try:
+        applog.set_level(str(cfg.get("logLevel") or "info"))
+    except Exception:
+        pass
     return cfg
 
 
 def save_config(cfg: dict) -> None:
+    if "logLevel" in cfg:
+        cfg["logLevel"] = applog.set_level(str(cfg.get("logLevel") or "info"))
     CONFIG_PATH.write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
 
@@ -1822,7 +1839,28 @@ def api_config():
         if key in data:
             cfg[key] = data[key]
     save_config(cfg)
+    applog.info("Config saved", f"keys={sorted(data.keys())}")
     return jsonify({"ok": True, "config": cfg})
+
+
+@app.post("/api/log")
+def api_client_log():
+    """Accept UI/client log lines into launcher.log."""
+    data = request.get_json(silent=True) or {}
+    level = str(data.get("level") or "info").strip().lower()
+    message = str(data.get("message") or data.get("msg") or "").strip()
+    detail = data.get("detail")
+    if not message:
+        return jsonify({"ok": False, "error": "Empty message"}), 400
+    if level == "debug":
+        applog.debug(f"[ui] {message}", detail)
+    elif level == "warning":
+        applog.warning(f"[ui] {message}", detail)
+    elif level == "error":
+        applog.error(f"[ui] {message}", detail)
+    else:
+        applog.info(f"[ui] {message}", detail)
+    return jsonify({"ok": True, "logPath": applog.get_log_path(), "level": applog.get_level()})
 
 
 @app.post("/api/update-check")
@@ -2075,15 +2113,26 @@ def _json_str(data: dict, key: str, default: str = "") -> str:
 @app.post("/api/convert")
 def api_convert():
     if _job["running"]:
+        applog.warning("Convert rejected — job already running")
         return jsonify({"ok": False, "error": "A job is already running."}), 409
 
     try:
         data = request.get_json(silent=True) or {}
         cfg = load_config()
         game_root = Path(_json_str(data, "gameRoot"))
+        applog.info("Convert requested", str(game_root))
         out_raw = _json_str(data, "outputDir")
         # Path("") becomes "." in pathlib - treat blank as default output folder.
-        output_dir = Path(out_raw) if out_raw else (game_root / "anyps5-out")
+        if out_raw:
+            output_dir = Path(out_raw)
+        elif str(cfg.get("convertedGamesRoot") or "").strip():
+            from library import inspect_game_folder, safe_folder_name
+
+            meta = inspect_game_folder(game_root)
+            folder = safe_folder_name(str(meta.get("title") or game_root.name))
+            output_dir = Path(cfg["convertedGamesRoot"]) / folder
+        else:
+            output_dir = game_root / "anyps5-out"
 
         if not str(game_root) or str(game_root) == ".":
             return jsonify({"ok": False, "error": "Please set a game folder."}), 400
@@ -2501,6 +2550,13 @@ def api_convert():
                 cfg2["lastOutputExe"] = str(out_exe)
                 cfg2["outputName"] = out_name
                 save_config(cfg2)
+                try:
+                    from library import finalize_converted_game
+
+                    finalize_converted_game(output_dir, game_root)
+                    append_job("[4/4] Library metadata + artwork written into game folder")
+                except Exception as e:
+                    append_job(f"[WARN] Library metadata: {e}")
                 set_job_progress(
                     phase="done",
                     label="Convert finished — safe to start the game",
@@ -2551,22 +2607,251 @@ def api_convert():
 
 @app.post("/api/start")
 def api_start():
+    import game_session
+    from library import find_entry_by_id, mark_played
+
     cfg = load_config()
-    exe = Path(cfg.get("lastOutputExe") or "")
+    data = request.get_json(silent=True) or {}
+    exe = Path("")
+    title = ""
+    entry_id = str(data.get("id") or "").strip()
+    exe_raw = str(data.get("exePath") or "").strip()
+    if entry_id:
+        entry = find_entry_by_id(entry_id)
+        if not entry or entry.get("kind") != "converted":
+            applog.warning("Start failed — library id not found", entry_id)
+            return jsonify({"ok": False, "error": "Converted game not found. Scan library first."}), 404
+        exe = Path(entry.get("exePath") or "")
+        title = str(entry.get("title") or "")
+    elif exe_raw:
+        exe = Path(exe_raw)
+        title = str(data.get("title") or exe.stem)
+    else:
+        exe = Path(cfg.get("lastOutputExe") or "")
+        title = exe.stem
     if not exe.is_file():
+        applog.warning("Start failed — exe missing", str(exe))
         return jsonify({"ok": False, "error": "No converted .exe yet. Convert first."}), 400
-    # Repair MinGW runtimes before launch (older converts often lack them → error 126)
+    if game_session.is_running():
+        st = game_session.get_status()
+        applog.warning("Start rejected — game already running", st.get("title"))
+        return jsonify(
+            {
+                "ok": False,
+                "error": f"Already running: {st.get('title') or 'a game'}. Close it before starting another.",
+                "game": st,
+            }
+        ), 409
+    if _job["running"]:
+        return jsonify(
+            {"ok": False, "error": f"Wait for {_job.get('kind') or 'the current job'} to finish."}
+        ), 409
+    applog.info("Starting game", str(exe))
     mingw_ok, mingw_detail = ensure_mingw_runtime_for_output(exe.parent)
     if not mingw_ok:
         return jsonify({"ok": False, "error": mingw_detail}), 400
     env = tool_env()
-    if cfg.get("gpuFilter"):
-        env["ANYPS5_GPU"] = str(cfg["gpuFilter"])
+    gpu = str(data.get("gpuFilter") or cfg.get("gpuFilter") or "").strip()
+    if gpu:
+        env["ANYPS5_GPU"] = gpu
+    # Default: show a separate game console so init/compile output is visible.
+    if "hideGameConsole" in data:
+        hide_console = bool(data.get("hideGameConsole"))
+    elif "windowsGui" in data:
+        # Legacy: Convert-tab "Hide console" was sometimes sent on start
+        hide_console = bool(data.get("windowsGui"))
+    else:
+        hide_console = bool(cfg.get("hideGameConsole", False))
     try:
-        subprocess.Popen([str(exe)], cwd=str(exe.parent), env=env)
-        return jsonify({"ok": True, "exe": str(exe), "mingw": mingw_detail})
+        session = game_session.start_game(
+            exe,
+            title=title or exe.stem,
+            env=env,
+            log_dir=LOGS_DIR,
+            hide_console=hide_console,
+        )
+        cfg["lastOutputExe"] = str(exe)
+        cfg["lastOutputDir"] = str(exe.parent)
+        save_config(cfg)
+        try:
+            mark_played(exe.parent)
+        except Exception:
+            pass
+        applog.info("Game started", f"pid={session.get('pid')} title={session.get('title')!r}")
+        return jsonify(
+            {
+                "ok": True,
+                "exe": str(exe),
+                "mingw": mingw_detail,
+                "game": session,
+                "message": f"Game {session.get('title')} started and running",
+            }
+        )
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e), "game": game_session.get_status()}), 409
     except Exception as e:
+        applog.error("Start failed", str(e))
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.get("/api/game/status")
+def api_game_status():
+    import game_session
+
+    return jsonify({"ok": True, "game": game_session.get_status()})
+
+
+@app.post("/api/game/stop")
+def api_game_stop():
+    import game_session
+
+    st = game_session.stop_game(force=True)
+    applog.info("Game stop requested", st.get("title"))
+    return jsonify({"ok": True, "game": st})
+
+
+@app.get("/api/library")
+def api_library():
+    from library import ensure_library_ready, get_progress, needs_first_scan
+
+    cfg = load_config()
+    conv = cfg.get("convertedGamesRoot") or ""
+    unconv = cfg.get("unconvertedGamesRoot") or ""
+    library = ensure_library_ready(conv, unconv)
+    first = needs_first_scan(conv, unconv)
+    return jsonify(
+        {
+            "ok": True,
+            "library": library,
+            "progress": get_progress(),
+            "needsFirstScan": first,
+        }
+    )
+
+
+@app.get("/api/library/progress")
+def api_library_progress():
+    from library import get_progress
+
+    return jsonify({"ok": True, "progress": get_progress()})
+
+
+@app.post("/api/library/scan")
+def api_library_scan():
+    from library import get_progress, start_scan_async
+
+    if _job["running"]:
+        applog.warning("Library scan rejected — job running", _job.get("kind"))
+        return jsonify(
+            {
+                "ok": False,
+                "error": f"Wait for {_job.get('kind') or 'the current job'} to finish before scanning.",
+            }
+        ), 409
+    cfg = load_config()
+    data = request.get_json(silent=True) or {}
+    fetch_remote = data.get("fetchRemote", True)
+    mode = str(data.get("mode") or "incremental").strip().lower()
+    if mode not in ("first", "incremental", "full"):
+        mode = "incremental"
+    if not str(cfg.get("convertedGamesRoot") or "").strip() and not str(
+        cfg.get("unconvertedGamesRoot") or ""
+    ).strip():
+        applog.warning("Library scan rejected — library folders not set")
+        return jsonify(
+            {
+                "ok": False,
+                "error": "Set Converted / Unconverted Game Folder in Settings first.",
+            }
+        ), 400
+    applog.info(
+        "Library scan requested",
+        f"mode={mode} fetchRemote={bool(fetch_remote)} converted={cfg.get('convertedGamesRoot')!r} "
+        f"unconverted={cfg.get('unconvertedGamesRoot')!r}",
+    )
+    started = start_scan_async(
+        cfg.get("convertedGamesRoot") or "",
+        cfg.get("unconvertedGamesRoot") or "",
+        fetch_remote=bool(fetch_remote),
+        mode=mode,
+    )
+    applog.info("Library scan " + ("started" if started else "already running"))
+    msg = {
+        "first": "First time scan started",
+        "incremental": "Scanning for newly added games…",
+        "full": "Full library scan started",
+    }.get(mode, "Scan started")
+    return jsonify(
+        {
+            "ok": True,
+            "started": started,
+            "mode": mode,
+            "progress": get_progress(),
+            "message": "Scan already running" if not started else msg,
+        }
+    )
+
+
+@app.post("/api/library/prepare-convert")
+def api_library_prepare_convert():
+    from library import prepare_convert_paths
+
+    cfg = load_config()
+    data = request.get_json(silent=True) or {}
+    path = str(data.get("path") or data.get("gameRoot") or "").strip()
+    if not path:
+        applog.warning("prepare-convert missing path")
+        return jsonify({"ok": False, "error": "Missing game path."}), 400
+    applog.info("prepare-convert", path)
+    try:
+        prepared = prepare_convert_paths(path, cfg.get("convertedGamesRoot") or "")
+    except Exception as e:
+        applog.error("prepare-convert failed", str(e))
+        return jsonify({"ok": False, "error": str(e)}), 400
+    applog.info(
+        "prepare-convert ready",
+        f"title={prepared.get('title')!r} output={prepared.get('outputDir')!r}",
+    )
+    # Settings converter defaults + game-named exe (not the global default app.exe)
+    to_intel = cfg.get("toIntel")
+    if isinstance(to_intel, str):
+        to_intel = to_intel.strip().lower() in ("1", "true", "yes", "on")
+    return jsonify(
+        {
+            "ok": True,
+            **prepared,
+            "defaults": {
+                "outputName": prepared.get("suggestedOutputName")
+                or cfg.get("outputName")
+                or "app.exe",
+                "gpuFilter": str(cfg.get("gpuFilter") or ""),
+                "toIntel": bool(to_intel),
+                "windowsGui": bool(cfg.get("windowsGui")),
+                "unusedFilter": str(cfg.get("unusedFilter") if cfg.get("unusedFilter") is not None else "0"),
+            },
+        }
+    )
+
+
+@app.get("/api/library/file")
+def api_library_file():
+    from flask import send_file
+
+    from library import path_allowed, resolve_game_file
+
+    entry_id = str(request.args.get("id") or "").strip()
+    which = str(request.args.get("which") or "cover").strip().lower()
+    if which not in ("cover", "backdrop"):
+        which = "cover"
+    cfg = load_config()
+    conv = str(cfg.get("convertedGamesRoot") or "")
+    unconv = str(cfg.get("unconvertedGamesRoot") or "")
+    path = resolve_game_file(entry_id, which, conv, unconv)
+    if not path:
+        return jsonify({"ok": False, "error": "Artwork not found."}), 404
+    if not path_allowed(path, conv, unconv):
+        return jsonify({"ok": False, "error": "Forbidden."}), 403
+    return send_file(path)
 
 
 @app.get("/api/setup/audit")

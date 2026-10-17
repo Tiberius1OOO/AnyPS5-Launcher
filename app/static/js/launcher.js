@@ -18,6 +18,62 @@
   let launcherUpdatePrompted = false; // once per page/runtime
   let launcherUpdateBusy = false;
   let launcherUpdateResolve = null; // unblock boot after Update / Keep
+  let libraryProgressTimer = null;
+  let libraryData = { converted: [], unconverted: [] };
+  let audioCtx = null;
+  let libraryScannedOnce = false;
+  let jobRunning = false;
+  let jobKind = "";
+  let libraryScanRunning = false;
+  let suppressConvertFill = false;
+  let settingsSaveTimer = null;
+  let backdropUrl = "";
+  let backdropLayer = "A";
+  let backdropTimer = null;
+  let gamePollTimer = null;
+  let playInFlight = false;
+
+  function clientLog(level, message, detail) {
+    try {
+      api("/api/log", {
+        method: "POST",
+        body: JSON.stringify({ level: level || "info", message, detail: detail || "" }),
+      }).catch(() => {});
+    } catch (_) {}
+  }
+
+  function isHeavyJobKind(kind) {
+    return /build|rebuild|convert|setup|update|pull|git/i.test(String(kind || ""));
+  }
+
+  function updateJobLocks(running, kind = "") {
+    jobRunning = !!running;
+    jobKind = running ? (kind || jobKind || "Job") : "";
+    const block = jobRunning;
+    [
+      "btnConvert", "btnRebuild", "btnPull", "btnStart2",
+      "btnLibraryScan", "btnSetupInstall", "btnMarkBuild",
+    ].forEach((id) => {
+      const el = $(id);
+      if (el) el.disabled = block;
+    });
+    // Keep Settings, Library browse, tabs, update-check usable
+    if (!block && $("jobStatus") && !$("jobStatus").dataset.sticky) {
+      $("jobStatus").textContent = "Ready";
+    }
+  }
+
+  function guardHeavyAction(actionLabel) {
+    if (libraryScanRunning) {
+      toast("Wait until the library scan finishes.", "error");
+      clientLog("warning", `Blocked ${actionLabel} — library scan running`);
+      return false;
+    }
+    if (!jobRunning) return true;
+    toast(`Wait until ${jobKind || "the current job"} finishes before ${actionLabel}.`, "error");
+    clientLog("warning", `Blocked ${actionLabel} — job running`, jobKind);
+    return false;
+  }
 
   function toast(msg, kind = "") {
     const el = $("toast");
@@ -47,15 +103,12 @@
       .replaceAll('"', "&quot;");
   }
 
-  function setBusy(busy) {
-    [
-      "btnConvert", "btnRebuild", "btnPull", "btnStart", "btnStart2",
-      "btnFetch", "btnUpdateCheck", "btnSetupInstall", "btnInputSave", "btnMarkBuild",
-    ].forEach((id) => {
-      const el = $(id);
-      if (el) el.disabled = busy;
-    });
-    $("jobStatus").textContent = busy ? "Job running..." : "Ready";
+  function setBusy(busy, kind = "") {
+    // Only lock heavy actions — Settings / Library browsing stay available
+    updateJobLocks(busy, kind || jobKind || "Job");
+    if ($("jobStatus")) {
+      $("jobStatus").textContent = busy ? `Running: ${kind || jobKind || "Job"}` : "Ready";
+    }
   }
 
   function on(id, event, handler) {
@@ -124,13 +177,512 @@
   function fillConfig(cfg) {
     if (!cfg) return;
     if (cfg.anyps5Root != null && $("anyps5Root")) $("anyps5Root").value = cfg.anyps5Root || "";
-    if (cfg.lastGameRoot) $("gameRoot").value = cfg.lastGameRoot;
-    if (cfg.lastOutputDir) $("outputDir").value = cfg.lastOutputDir;
-    if (cfg.outputName) $("outputName").value = cfg.outputName;
-    if (cfg.gpuFilter != null) $("gpuFilter").value = cfg.gpuFilter;
-    if (cfg.unusedFilter != null) $("unusedFilter").value = String(cfg.unusedFilter);
-    $("toIntel").checked = !!cfg.toIntel;
-    $("windowsGui").checked = !!cfg.windowsGui;
+    // Settings always sync
+    if ($("unconvertedGamesRoot")) $("unconvertedGamesRoot").value = cfg.unconvertedGamesRoot || "";
+    if ($("convertedGamesRoot")) $("convertedGamesRoot").value = cfg.convertedGamesRoot || "";
+    if ($("settingsOutputName")) $("settingsOutputName").value = cfg.outputName || "app.exe";
+    if ($("settingsGpuFilter")) $("settingsGpuFilter").value = cfg.gpuFilter || "";
+    if ($("settingsUnusedFilter")) $("settingsUnusedFilter").value = String(cfg.unusedFilter ?? "0");
+    if ($("settingsToIntel")) $("settingsToIntel").checked = !!cfg.toIntel;
+    if ($("settingsWindowsGui")) $("settingsWindowsGui").checked = !!cfg.windowsGui;
+    if ($("settingsHideGameConsole")) $("settingsHideGameConsole").checked = !!cfg.hideGameConsole;
+    if ($("settingsLogLevel")) $("settingsLogLevel").value = cfg.logLevel || "info";
+    // Convert form — skip while library prefill is applying
+    if (!suppressConvertFill) {
+      if (cfg.lastGameRoot && $("gameRoot")) $("gameRoot").value = cfg.lastGameRoot;
+      if (cfg.lastOutputDir && $("outputDir")) $("outputDir").value = cfg.lastOutputDir;
+      if (cfg.outputName && $("outputName")) $("outputName").value = cfg.outputName;
+      if (cfg.gpuFilter != null && $("gpuFilter")) $("gpuFilter").value = cfg.gpuFilter;
+      if (cfg.unusedFilter != null && $("unusedFilter")) $("unusedFilter").value = String(cfg.unusedFilter);
+      if ($("toIntel")) $("toIntel").checked = !!cfg.toIntel;
+      if ($("windowsGui")) $("windowsGui").checked = !!cfg.windowsGui;
+    }
+  }
+
+  function playConvertChime() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!Ctx) return;
+      if (!audioCtx) audioCtx = new Ctx();
+      const ctx = audioCtx;
+      if (ctx.state === "suspended") ctx.resume().catch(() => {});
+      const now = ctx.currentTime;
+      const notes = [523.25, 659.25, 783.99, 1046.5]; // C5 E5 G5 C6
+      notes.forEach((freq, i) => {
+        const osc = ctx.createOscillator();
+        const gain = ctx.createGain();
+        osc.type = "sine";
+        osc.frequency.value = freq;
+        const t0 = now + i * 0.12;
+        gain.gain.setValueAtTime(0.0001, t0);
+        gain.gain.exponentialRampToValueAtTime(0.09, t0 + 0.04);
+        gain.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.55);
+        osc.connect(gain);
+        gain.connect(ctx.destination);
+        osc.start(t0);
+        osc.stop(t0 + 0.6);
+      });
+    } catch (_) {}
+  }
+
+  function setLibraryBackdrop(url) {
+    if (!url || url === backdropUrl) return;
+    const next = url;
+    const curId = backdropLayer === "A" ? "bgGameA" : "bgGameB";
+    const nextId = backdropLayer === "A" ? "bgGameB" : "bgGameA";
+    const cur = $(curId);
+    const nxt = $(nextId);
+    if (!nxt) return;
+    if (backdropTimer) {
+      clearTimeout(backdropTimer);
+      backdropTimer = null;
+    }
+    nxt.style.backgroundImage = `url("${next}")`;
+    // Half-second fade out of current, half-second fade in of next (1s total)
+    if (cur && cur.classList.contains("visible")) {
+      cur.classList.remove("visible");
+      backdropTimer = window.setTimeout(() => {
+        nxt.classList.add("visible");
+        backdropLayer = backdropLayer === "A" ? "B" : "A";
+        backdropUrl = next;
+        backdropTimer = null;
+      }, 500);
+    } else {
+      nxt.classList.add("visible");
+      if (cur) cur.classList.remove("visible");
+      backdropLayer = backdropLayer === "A" ? "B" : "A";
+      backdropUrl = next;
+    }
+  }
+
+  function renderLibraryProgress(progress) {
+    const wrap = $("libraryProgressWrap");
+    const label = $("libraryProgressLabel");
+    const pctEl = $("libraryProgressPct");
+    const detail = $("libraryProgressDetail");
+    const fill = $("libraryProgressFill");
+    if (!wrap) return;
+    const running = !!(progress && progress.running);
+    libraryScanRunning = running;
+    // Disable heavy actions while scanning art
+    if ($("btnConvert")) $("btnConvert").disabled = jobRunning || libraryScanRunning;
+    if ($("btnRebuild")) $("btnRebuild").disabled = jobRunning || libraryScanRunning;
+    if ($("btnLibraryScan")) $("btnLibraryScan").disabled = jobRunning || libraryScanRunning;
+    const phaseLabel = (progress && (progress.phaseLabel || progress.phase)) || "";
+    if (!running && !(progress && progress.phase === "done" && phaseLabel)) {
+      // Keep brief "ready" flash only while running or just finished with label during poll
+      if (!running) {
+        wrap.hidden = true;
+        if (fill) fill.classList.remove("busy", "indeterminate");
+      }
+      return;
+    }
+    wrap.hidden = false;
+    const pct = progress && progress.percent != null ? Number(progress.percent) : null;
+    const rate = (progress && progress.rate) ? String(progress.rate).trim() : "";
+    if (label) label.textContent = phaseLabel || "Scanning game folders";
+    if (pctEl) {
+      const pctBit = pct != null && !Number.isNaN(pct) ? `${Math.round(pct)}%` : (running ? "…" : "");
+      pctEl.textContent = rate && pctBit ? `${pctBit} · ${rate}` : pctBit;
+    }
+    if (detail) detail.textContent = (progress && progress.detail) || "";
+    applyBarFill(fill, pct, running);
+  }
+
+  function libraryCardHtml(game, kind) {
+    const fallbackText = escapeHtml(game.title || game.folderName || "Game");
+    const cover = game.coverUrl
+      ? `<img src="${escapeHtml(game.coverUrl)}" alt="${fallbackText}" loading="lazy" data-fallback="${fallbackText}" onerror="this.onerror=null;var t=this.getAttribute('data-fallback')||'Game';var d=document.createElement('div');d.className='library-cover-fallback';d.textContent=t;this.replaceWith(d);" />`
+      : `<div class="library-cover-fallback">${fallbackText}</div>`;
+    const badge = kind === "converted"
+      ? `<span class="library-badge playable">Play</span>`
+      : `<span class="library-badge needs-convert">Convert</span>`;
+    const overlay = kind === "converted"
+      ? `<div class="library-play"><span>Play</span></div>`
+      : `<div class="library-play"><span>Convert</span></div>`;
+    const meta = escapeHtml(game.titleId || game.folderName || "");
+    const backdrop = escapeHtml(game.backdropUrl || game.coverUrl || "");
+    const pathAttr = encodeURIComponent(game.path || "");
+    const titleAttr = escapeHtml(game.title || "");
+    const backdropAttr = encodeURIComponent(game.backdropUrl || game.coverUrl || "");
+    return `
+      <button type="button" class="library-card" data-id="${escapeHtml(game.id)}" data-kind="${kind}"
+        data-path="${pathAttr}" data-title="${titleAttr}"
+        data-backdrop="${backdropAttr}" title="${titleAttr}">
+        <div class="library-cover">
+          ${badge}
+          ${cover}
+          ${overlay}
+        </div>
+        <div class="library-title">${escapeHtml(game.title || "Untitled")}</div>
+        <div class="library-meta">${meta}</div>
+      </button>`;
+  }
+
+  function renderLibrary(library) {
+    libraryData = library || { converted: [], unconverted: [] };
+    const conv = libraryData.converted || [];
+    const unconv = libraryData.unconverted || [];
+    const convEl = $("libraryConverted");
+    const unconvEl = $("libraryUnconverted");
+    const convEmpty = $("libraryConvertedEmpty");
+    const unconvEmpty = $("libraryUnconvertedEmpty");
+    if ($("libraryConvertedCount")) $("libraryConvertedCount").textContent = `(${conv.length})`;
+    if ($("libraryUnconvertedCount")) $("libraryUnconvertedCount").textContent = `(${unconv.length})`;
+    if ($("libraryConvertedSize")) {
+      $("libraryConvertedSize").textContent = libraryData.convertedTotalLabel
+        ? `· ${libraryData.convertedTotalLabel}`
+        : "";
+    }
+    if ($("libraryUnconvertedSize")) {
+      $("libraryUnconvertedSize").textContent = libraryData.unconvertedTotalLabel
+        ? `· ${libraryData.unconvertedTotalLabel}`
+        : "";
+    }
+    if (convEl) {
+      convEl.innerHTML = conv.map((g) => libraryCardHtml(g, "converted")).join("");
+      if (convEmpty) convEmpty.hidden = conv.length > 0;
+    }
+    if (unconvEl) {
+      unconvEl.innerHTML = unconv.map((g) => libraryCardHtml(g, "unconverted")).join("");
+      if (unconvEmpty) unconvEmpty.hidden = unconv.length > 0;
+    }
+  }
+
+  async function loadLibrary(quiet = true) {
+    try {
+      const data = await api("/api/library");
+      renderLibrary(data.library || {});
+      if (data.progress) renderLibraryProgress(data.progress);
+      if (data.library && data.library.initialScanDone) libraryScannedOnce = true;
+      return data;
+    } catch (e) {
+      if (!quiet) toast(e.message, "error");
+      return null;
+    }
+  }
+
+  function stopLibraryProgressPoll() {
+    if (libraryProgressTimer) {
+      clearInterval(libraryProgressTimer);
+      libraryProgressTimer = null;
+    }
+  }
+
+  function startLibraryProgressPoll(onDone) {
+    stopLibraryProgressPoll();
+    const tick = async () => {
+      try {
+        const data = await api("/api/library/progress");
+        renderLibraryProgress(data.progress);
+        if (data.progress && !data.progress.running) {
+          stopLibraryProgressPoll();
+          await loadLibrary(true);
+          // Hide bar shortly after done
+          window.setTimeout(() => {
+            const wrap = $("libraryProgressWrap");
+            if (wrap && data.progress && !data.progress.running) wrap.hidden = true;
+          }, 1200);
+          if (onDone) onDone(data);
+        }
+      } catch (_) {}
+    };
+    tick();
+    libraryProgressTimer = setInterval(tick, 300);
+  }
+
+  async function scanLibraryFolders({
+    toastOnStart = true,
+    fetchRemote = true,
+    mode = "incremental",
+  } = {}) {
+    if (!guardHeavyAction("scanning the library")) return;
+    try {
+      clientLog("info", "Library scan button / request", `mode=${mode} fetchRemote=${fetchRemote}`);
+      const data = await api("/api/library/scan", {
+        method: "POST",
+        body: JSON.stringify({ fetchRemote: !!fetchRemote, mode }),
+      });
+      libraryScannedOnce = true;
+      if (toastOnStart) {
+        const startedMsg = mode === "first"
+          ? "First time scan…"
+          : (data.message || "Scanning for newly added games…");
+        toast(data.started ? startedMsg : (data.message || "Scan running"), "ok");
+      }
+      renderLibraryProgress(data.progress);
+      if (data.started || (data.progress && data.progress.running)) {
+        startLibraryProgressPoll();
+      } else {
+        await loadLibrary(true);
+      }
+    } catch (e) {
+      clientLog("error", "Library scan failed", e.message || String(e));
+      toast(e.message, "error");
+    }
+  }
+
+  async function ensureLibraryOnOpen() {
+    bindLibraryGridClicks();
+    const data = await loadLibrary(true);
+    if (!data) return;
+    const hasRoots = !!(($("convertedGamesRoot")?.value || "").trim()
+      || ($("unconvertedGamesRoot")?.value || "").trim());
+    if (hasRoots && data.needsFirstScan && !jobRunning && !libraryScanRunning) {
+      clientLog("info", "First time library scan");
+      await scanLibraryFolders({ toastOnStart: true, fetchRemote: true, mode: "first" });
+    }
+  }
+
+  async function openUnconvertedForConvert(game) {
+    if (!guardHeavyAction("starting a convert")) return;
+    let path = (game && game.path) || "";
+    const title = (game && game.title) || "";
+    clientLog("info", "Library Convert clicked", path || title);
+    if (!path) {
+      clientLog("error", "Convert click missing path", title);
+      toast("Missing game path. Use Scan for newly added games and try again.", "error");
+      return;
+    }
+    suppressConvertFill = true;
+    showTab("convert");
+    try {
+      const data = await api("/api/library/prepare-convert", {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      });
+      const d = data.defaults || {};
+      path = data.gameRoot || path;
+      if ($("gameRoot")) $("gameRoot").value = path;
+      if ($("outputDir")) $("outputDir").value = data.outputDir || "";
+      // Game-named exe from prepare; settings for intel/gpu/cleanup/gui
+      if ($("outputName")) {
+        $("outputName").value = data.suggestedOutputName || d.outputName || "app.exe";
+      }
+      if ($("gpuFilter")) $("gpuFilter").value = d.gpuFilter != null ? String(d.gpuFilter) : "";
+      if ($("unusedFilter")) $("unusedFilter").value = String(d.unusedFilter ?? "0");
+      if ($("toIntel")) $("toIntel").checked = d.toIntel === true || d.toIntel === 1 || d.toIntel === "true";
+      if ($("windowsGui")) $("windowsGui").checked = d.windowsGui === true || d.windowsGui === 1 || d.windowsGui === "true";
+      await savePrefs();
+      showTab("convert");
+      clientLog(
+        "info",
+        "prepare-convert OK",
+        `root=${path} out=${data.outputDir} exe=${$("outputName")?.value} intel=${$("toIntel")?.checked}`,
+      );
+      toast(`Ready to convert: ${data.title || title}`, "ok");
+    } catch (e) {
+      clientLog("error", "prepare-convert failed", e.message || String(e));
+      toast(e.message, "error");
+      if (/Converted Game Folder/i.test(e.message || "")) showTab("settings");
+    } finally {
+      window.setTimeout(() => { suppressConvertFill = false; }, 2500);
+    }
+  }
+
+  function setGameLock(game) {
+    const lock = $("gameLock");
+    if (!lock) return;
+    const running = !!(game && game.running);
+    const starting = !!(game && game.starting) || (running && (game.pid == null || game.pid === "" || game.pid === "…"));
+    lock.hidden = !running;
+    lock.classList.toggle("is-starting", starting);
+    document.body.classList.toggle("game-running", running);
+    if ($("gameLockEyebrow")) {
+      $("gameLockEyebrow").textContent = starting ? "Starting game" : "Game running";
+    }
+    if ($("gameLockTitle")) {
+      if (!running) {
+        $("gameLockTitle").textContent = "Started";
+      } else if (starting) {
+        $("gameLockTitle").textContent = `Starting ${game.title || "game"}…`;
+      } else {
+        $("gameLockTitle").textContent = `${game.title || "Game"} started and running`;
+      }
+    }
+    if ($("gameLockDetail")) {
+      if (!running) {
+        $("gameLockDetail").textContent = "Close the game to unlock the launcher.";
+      } else if (starting) {
+        $("gameLockDetail").textContent = "Preparing runtimes and launching — please wait…";
+      } else if (game.logPath) {
+        $("gameLockDetail").textContent =
+          `PID ${game.pid || "—"} · log: ${String(game.logPath).split(/[/\\\\]/).pop()}`;
+      } else {
+        $("gameLockDetail").textContent =
+          `PID ${game.pid || "—"} · Close the game to unlock the launcher.`;
+      }
+    }
+    if ($("jobStatus") && running) {
+      $("jobStatus").textContent = starting
+        ? `Starting ${game.title || "game"}…`
+        : `Game ${game.title || ""} started and running`;
+    }
+  }
+
+  function stopGamePoll() {
+    if (gamePollTimer) {
+      clearInterval(gamePollTimer);
+      gamePollTimer = null;
+    }
+  }
+
+  function startGamePoll() {
+    stopGamePoll();
+    const tick = async () => {
+      try {
+        const data = await api("/api/game/status");
+        const g = data.game || {};
+        setGameLock(g);
+        if (!g.running) {
+          stopGamePoll();
+          playInFlight = false;
+          if ($("jobStatus") && !jobRunning) $("jobStatus").textContent = "Ready";
+          clientLog("info", "Game session ended", g.title || "");
+          toast(g.title ? `${g.title} closed` : "Game closed", "ok");
+        }
+      } catch (_) {}
+    };
+    tick();
+    gamePollTimer = setInterval(tick, 1000);
+  }
+
+  async function playLibraryGame(game) {
+    if (playInFlight || document.body.classList.contains("game-running")) {
+      toast("A game is already starting or running.", "error");
+      return;
+    }
+    if (!guardHeavyAction("starting a game")) return;
+    playInFlight = true;
+    // Immediate lock so rapid clicks cannot queue more launches
+    setGameLock({
+      running: true,
+      starting: true,
+      title: game.title || "Game",
+      pid: "…",
+      logPath: "",
+    });
+    try {
+      const data = await api("/api/start", {
+        method: "POST",
+        body: JSON.stringify({
+          id: game.id,
+          title: game.title || "",
+          hideGameConsole: !!$("settingsHideGameConsole")?.checked,
+        }),
+      });
+      const g = data.game || {
+        running: true,
+        title: game.title,
+        exe: data.exe,
+        pid: data.game && data.game.pid,
+      };
+      setGameLock(g);
+      toast(data.message || `Game ${g.title || ""} started and running`, "ok");
+      clientLog("info", "Game started from library", data.exe || "");
+      startGamePoll();
+    } catch (e) {
+      playInFlight = false;
+      setGameLock({ running: false });
+      clientLog("error", "Game start failed", e.message || String(e));
+      toast(e.message, "error");
+    }
+  }
+
+  function bindLibraryGridClicks() {
+    const root = $("tab-library");
+    if (!root || root._libraryBound) return;
+    root._libraryBound = true;
+    root.addEventListener("click", (ev) => {
+      const card = ev.target.closest && ev.target.closest(".library-card");
+      if (!card) return;
+      ev.preventDefault();
+      const id = card.dataset.id || "";
+      const kind = card.dataset.kind || "";
+      let path = "";
+      try { path = decodeURIComponent(card.dataset.path || ""); } catch (_) { path = card.dataset.path || ""; }
+      const title = card.dataset.title || "";
+      const fromList = [...(libraryData.converted || []), ...(libraryData.unconverted || [])]
+        .find((g) => g.id === id);
+      const game = fromList || { id, path, title, kind };
+      if (!game.path) game.path = path;
+      clientLog("debug", "Library card click", `${kind} ${path || id}`);
+      if (kind === "converted") playLibraryGame(game);
+      else openUnconvertedForConvert(game);
+    });
+    root.addEventListener("pointerover", (ev) => {
+      const card = ev.target.closest && ev.target.closest(".library-card");
+      if (!card) return;
+      let url = "";
+      try { url = decodeURIComponent(card.dataset.backdrop || ""); } catch (_) { url = card.dataset.backdrop || ""; }
+      if (url) setLibraryBackdrop(url);
+    });
+    root.addEventListener("focusin", (ev) => {
+      const card = ev.target.closest && ev.target.closest(".library-card");
+      if (!card) return;
+      let url = "";
+      try { url = decodeURIComponent(card.dataset.backdrop || ""); } catch (_) { url = card.dataset.backdrop || ""; }
+      if (url) setLibraryBackdrop(url);
+    });
+  }
+
+  async function saveSettings({ quiet = true } = {}) {
+    await api("/api/config", {
+      method: "POST",
+      body: JSON.stringify({
+        unconvertedGamesRoot: ($("unconvertedGamesRoot")?.value || "").trim(),
+        convertedGamesRoot: ($("convertedGamesRoot")?.value || "").trim(),
+        outputName: ($("settingsOutputName")?.value || "").trim() || "app.exe",
+        gpuFilter: ($("settingsGpuFilter")?.value || "").trim(),
+        unusedFilter: $("settingsUnusedFilter")?.value || "0",
+        toIntel: !!$("settingsToIntel")?.checked,
+        windowsGui: !!$("settingsWindowsGui")?.checked,
+        hideGameConsole: !!$("settingsHideGameConsole")?.checked,
+        logLevel: $("settingsLogLevel")?.value || "info",
+      }),
+    });
+    // Mirror converter defaults into Convert form (unless prefill lock)
+    if (!suppressConvertFill) {
+      if ($("gpuFilter")) $("gpuFilter").value = ($("settingsGpuFilter")?.value || "").trim();
+      if ($("unusedFilter")) $("unusedFilter").value = $("settingsUnusedFilter")?.value || "0";
+      if ($("toIntel")) $("toIntel").checked = !!$("settingsToIntel")?.checked;
+      if ($("windowsGui")) $("windowsGui").checked = !!$("settingsWindowsGui")?.checked;
+    }
+    clientLog("debug", "Settings auto-saved", `logLevel=${$("settingsLogLevel")?.value || "info"}`);
+    const badge = $("settingsSaveBadge");
+    if (badge) {
+      badge.hidden = false;
+      badge.textContent = "Saved";
+      badge.className = "badge ok";
+      clearTimeout(saveSettings._badgeT);
+      saveSettings._badgeT = setTimeout(() => { badge.hidden = true; }, 1200);
+    }
+    if (!quiet) toast("Settings saved", "ok");
+  }
+
+  function scheduleSettingsSave() {
+    clearTimeout(settingsSaveTimer);
+    settingsSaveTimer = setTimeout(() => {
+      saveSettings({ quiet: true }).catch((e) => {
+        clientLog("error", "Settings auto-save failed", e.message || String(e));
+        toast(e.message, "error");
+      });
+    }, 350);
+  }
+
+  function bindSettingsAutosave() {
+    const ids = [
+      "unconvertedGamesRoot", "convertedGamesRoot",
+      "settingsOutputName", "settingsGpuFilter", "settingsUnusedFilter",
+      "settingsToIntel", "settingsWindowsGui", "settingsHideGameConsole", "settingsLogLevel",
+    ];
+    ids.forEach((id) => {
+      const el = $(id);
+      if (!el || el._autosaveBound) return;
+      el._autosaveBound = true;
+      el.addEventListener("change", scheduleSettingsSave);
+      el.addEventListener("input", scheduleSettingsSave);
+    });
   }
 
   function renderAlerts(g, b) {
@@ -228,17 +780,7 @@
       $("updateBadge").className = "badge danger";
     }
 
-    if (b.syncState === "current") {
-      $("statBuild").innerHTML = `<span class="ok-text">ready</span>`;
-    } else if (b.syncState === "outdated") {
-      $("statBuild").innerHTML = `<span class="danger-text">outdated</span>`;
-    } else if (b.ready) {
-      $("statBuild").innerHTML = `<span class="warn-text">check needed</span>`;
-    } else if (b.syncState === "need_setup") {
-      $("statBuild").innerHTML = `<span class="warn-text">need setup</span>`;
-    } else {
-      $("statBuild").innerHTML = `<span class="warn-text">not built</span>`;
-    }
+    renderBuildStat(b, data.job);
     if ($("anyps5RootLabel") && data.repoRoot) {
       $("anyps5RootLabel").textContent = data.repoRoot;
     }
@@ -263,8 +805,55 @@
     fillConfig(data.config);
 
     if (data.job && data.job.running) {
-      setBusy(true);
+      setBusy(true, data.job.kind || "Job");
       startJobPoll();
+    } else {
+      updateJobLocks(false);
+    }
+  }
+
+  function renderBuildStat(build, job) {
+    const el = $("statBuild");
+    const bar = $("statBuildProgress");
+    const fill = $("statBuildProgressFill");
+    if (!el) return;
+    const running = !!(job && job.running);
+    const kind = String((job && job.kind) || "");
+    const isBuildJob = running && /build|rebuild/i.test(kind);
+    if (isBuildJob) {
+      const pct = job.progress != null ? Math.max(0, Math.min(100, Number(job.progress))) : null;
+      const pctLabel = pct != null && !Number.isNaN(pct) ? `${Math.round(pct)}%` : "…";
+      el.innerHTML = `<span class="warn-text">Building ${pctLabel}</span>`;
+      if (bar) {
+        bar.hidden = false;
+        if (fill) {
+          if (pct != null && !Number.isNaN(pct)) {
+            fill.style.width = `${pct}%`;
+            fill.classList.remove("indeterminate");
+          } else {
+            fill.style.width = "35%";
+            fill.classList.add("indeterminate");
+          }
+        }
+      }
+      return;
+    }
+    if (bar) bar.hidden = true;
+    if (fill) {
+      fill.style.width = "0%";
+      fill.classList.remove("indeterminate");
+    }
+    const b = build || {};
+    if (b.syncState === "current") {
+      el.innerHTML = `<span class="ok-text">ready</span>`;
+    } else if (b.syncState === "outdated") {
+      el.innerHTML = `<span class="danger-text">outdated</span>`;
+    } else if (b.ready) {
+      el.innerHTML = `<span class="warn-text">check needed</span>`;
+    } else if (b.syncState === "need_setup") {
+      el.innerHTML = `<span class="warn-text">need setup</span>`;
+    } else {
+      el.innerHTML = `<span class="warn-text">not built</span>`;
     }
   }
 
@@ -423,8 +1012,15 @@
     document.querySelectorAll(".panel").forEach((p) => p.classList.toggle("active", p.id === `tab-${name}`));
     if (name === "readme") loadReadme();
     if (name === "setup") runSetupAudit(true).catch(() => {});
-    if (name === "controls") {
+    if (name === "settings") {
       loadInput().catch((e) => toast(e.message, "error"));
+    }
+    if (name === "library") {
+      ensureLibraryOnOpen().catch(() => {});
+      clientLog("debug", "Opened Library tab");
+    }
+    if (name === "convert") {
+      clientLog("debug", "Opened Convert tab");
     }
   }
 
@@ -518,6 +1114,16 @@
     $("console").scrollTop = $("console").scrollHeight;
     lastLineCount = lines.length;
     renderJobProgress(job);
+    updateJobLocks(!!job.running, job.kind || "");
+    // Live Build chip in the hero while compiling
+    if (job.running && /build|rebuild/i.test(String(job.kind || ""))) {
+      renderBuildStat(null, job);
+    } else if (!job.running) {
+      const mini = $("statBuildProgress");
+      if (mini && !mini.hidden && job.ok != null) {
+        // leave chip until refresh() reloads real build status
+      }
+    }
     if (job.running) {
       const pctBit = job.progress != null ? ` ${Math.round(job.progress)}%` : "";
       const bit = job.phaseLabel
@@ -555,7 +1161,15 @@
           pollTimer = null;
           setBusy(false);
           await refresh();
-          if (job.ok === true) toast(`${job.kind || "Job"} finished`, "ok");
+          if (job.ok === true) {
+            toast(`${job.kind || "Job"} finished`, "ok");
+            if (/convert/i.test(String(job.kind || ""))) {
+              playConvertChime();
+              clientLog("info", "Convert job finished OK — refreshing library");
+              showTab("library");
+              scanLibraryFolders({ toastOnStart: false, fetchRemote: true, mode: "incremental" });
+            }
+          }
           if (job.ok === false) {
             const sendLog = job.logHistoryPath || job.logPath || "";
             const logHint = sendLog
@@ -576,8 +1190,9 @@
   }
 
   async function beginJob(label, startFn, opts = {}) {
+    if (!guardHeavyAction("starting another operation")) return;
     try {
-      setBusy(true);
+      setBusy(true, opts.kind || label || "Job");
       lastLineCount = 0;
       if (!opts.stayOnTab) showTab("log");
       $("console").textContent = `${label}\n`;
@@ -922,25 +1537,44 @@
     await api("/api/config", {
       method: "POST",
       body: JSON.stringify({
-        lastGameRoot: $("gameRoot").value.trim(),
-        lastOutputDir: $("outputDir").value.trim(),
-        outputName: $("outputName").value.trim() || "app.exe",
-        gpuFilter: $("gpuFilter").value.trim(),
-        unusedFilter: $("unusedFilter").value,
-        toIntel: $("toIntel").checked,
-        windowsGui: $("windowsGui").checked,
+        lastGameRoot: ($("gameRoot")?.value || "").trim(),
+        lastOutputDir: ($("outputDir")?.value || "").trim(),
+        outputName: ($("outputName")?.value || "").trim() || "app.exe",
+        gpuFilter: ($("gpuFilter")?.value || "").trim(),
+        unusedFilter: $("unusedFilter")?.value || "0",
+        toIntel: !!$("toIntel")?.checked,
+        windowsGui: !!$("windowsGui")?.checked,
+        unconvertedGamesRoot: ($("unconvertedGamesRoot")?.value || "").trim(),
+        convertedGamesRoot: ($("convertedGamesRoot")?.value || "").trim(),
       }),
     });
   }
 
   async function startGame() {
+    if (playInFlight || document.body.classList.contains("game-running")) {
+      toast("A game is already starting or running.", "error");
+      return;
+    }
+    if (!guardHeavyAction("starting a game")) return;
+    playInFlight = true;
+    setGameLock({ running: true, starting: true, title: "Game", pid: "…", logPath: "" });
     try {
       await savePrefs();
-      const data = await api("/api/start", { method: "POST", body: "{}" });
-      toast(`Started: ${data.exe}`, "ok");
+      const data = await api("/api/start", {
+        method: "POST",
+        body: JSON.stringify({
+          hideGameConsole: !!$("settingsHideGameConsole")?.checked,
+        }),
+      });
+      const g = data.game || { running: true, title: "Game", exe: data.exe };
+      setGameLock(g);
+      toast(data.message || `Started: ${data.exe}`, "ok");
+      startGamePoll();
     } catch (e) {
-      toast(e.message + " Use Convert first.", "error");
-      showTab("convert");
+      playInFlight = false;
+      setGameLock({ running: false });
+      toast(e.message + " Use Library or Convert first.", "error");
+      showTab("library");
     }
   }
 
@@ -958,7 +1592,12 @@
         });
         if (data.path) {
           $(btn.dataset.browse).value = data.path;
-          await savePrefs();
+          const target = btn.dataset.browse || "";
+          if (target === "unconvertedGamesRoot" || target === "convertedGamesRoot") {
+            await saveSettings({ quiet: true });
+          } else {
+            await savePrefs();
+          }
         }
       } catch (e) {
         toast(e.message, "error");
@@ -966,8 +1605,34 @@
     });
   });
 
-  on("btnStart", "click", startGame);
-  on("btnStart2", "click", startGame);
+  on("btnStart2", "click", () => {
+    if (!guardHeavyAction("starting a game from Convert")) return;
+    startGame();
+  });
+  on("btnLibraryScan", "click", () => scanLibraryFolders({
+    toastOnStart: true,
+    fetchRemote: true,
+    mode: "incremental",
+  }));
+  on("btnGameStop", "click", async () => {
+    try {
+      const data = await api("/api/game/stop", { method: "POST", body: "{}" });
+      setGameLock(data.game || { running: false });
+      playInFlight = false;
+      stopGamePoll();
+      toast("Game stop requested", "ok");
+    } catch (e) {
+      toast(e.message, "error");
+    }
+  });
+  bindSettingsAutosave();
+  // Resume lock UI if a game is already running (rare after refresh)
+  api("/api/game/status").then((d) => {
+    if (d.game && d.game.running) {
+      setGameLock(d.game);
+      startGamePoll();
+    }
+  }).catch(() => {});
   on("btnUpdateCheck", "click", () => updateCheck().catch((e) => toast(e.message, "error")));
   on("btnFetch", "click", () => updateCheck().catch((e) => toast(e.message, "error")));
   on("btnOpenGithub", "click", () => openGithub());
@@ -987,12 +1652,20 @@
     }
   });
   on("btnReloadReadme", "click", () => loadReadme(true));
-  on("btnPull", "click", () =>
-    beginJob("Starting GitHub update...", () => api("/api/update", { method: "POST", body: "{}" }))
-  );
-  on("btnRebuild", "click", () =>
-    beginJob("Starting build...", () => api("/api/rebuild", { method: "POST", body: "{}" }))
-  );
+  on("btnPull", "click", () => {
+    beginJob(
+      "Starting GitHub update...",
+      () => api("/api/update", { method: "POST", body: "{}" }),
+      { kind: "Update" },
+    );
+  });
+  on("btnRebuild", "click", () => {
+    beginJob(
+      "Starting build...",
+      () => api("/api/rebuild", { method: "POST", body: "{}" }),
+      { kind: "Build" },
+    );
+  });
   on("btnMarkBuild", "click", async () => {
     try {
       const data = await api("/api/build/mark-current", { method: "POST", body: "{}" });
@@ -1004,16 +1677,17 @@
     }
   });
   on("btnConvert", "click", async () => {
+    if (!guardHeavyAction("converting")) return;
     await savePrefs();
     const gameRoot = $("gameRoot").value.trim();
     if (!gameRoot) {
       toast("Please set a game folder.", "error");
       return;
     }
-    // save input first so convert picks it up
     try { await saveInput(); } catch (_) {}
-    beginJob("Starting convert...", () =>
-      api("/api/convert", {
+    beginJob(
+      "Starting convert...",
+      () => api("/api/convert", {
         method: "POST",
         body: JSON.stringify({
           gameRoot,
@@ -1023,7 +1697,8 @@
           toIntel: $("toIntel").checked,
           windowsGui: $("windowsGui").checked,
         }),
-      })
+      }),
+      { kind: "Convert" },
     );
   });
   on("btnClearLog", "click", () => {
@@ -1232,8 +1907,20 @@
       // After logo lands: force update choice in the center before anything else
       try { await checkLauncherUpdateOnce(); } catch (_) {}
       toast("Launcher ready");
-      try { await runSetupAudit(true); } catch (_) {}
+      let auditOk = false;
+      try {
+        const auditData = await runSetupAudit(true);
+        auditOk = !!(auditData && auditData.audit && auditData.audit.allRequiredOk);
+      } catch (_) {}
       try { await updateCheck(true); } catch (_) {}
+      bindLibraryGridClicks();
+      bindSettingsAutosave();
+      if (auditOk) {
+        // Instant cache load — first-time scan only when Library opens and never scanned
+        showTab("library");
+      } else {
+        showTab("setup");
+      }
     })
     .catch((e) => toast("Status error: " + e.message, "error"));
 })();

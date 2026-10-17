@@ -9,11 +9,22 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Syne:wght@600;700;800&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/css/launcher.css?v=24" />
+  <link rel="stylesheet" href="/static/css/launcher.css?v=31" />
 </head>
 <body class="boot-pending">
   <div class="bg" aria-hidden="true"></div>
+  <div class="bg-game" id="bgGameA" aria-hidden="true"></div>
+  <div class="bg-game" id="bgGameB" aria-hidden="true"></div>
   <div class="grain" aria-hidden="true"></div>
+  <div class="game-lock" id="gameLock" hidden>
+    <div class="game-lock-card">
+      <div class="game-lock-spinner" aria-hidden="true"></div>
+      <p class="game-lock-eyebrow" id="gameLockEyebrow">Game running</p>
+      <h2 id="gameLockTitle">Started</h2>
+      <p class="muted" id="gameLockDetail">Close the game to unlock the launcher.</p>
+      <button class="btn compact" type="button" id="btnGameStop">Force stop</button>
+    </div>
+  </div>
 
   <div id="bootSplash" class="boot-splash" hidden aria-hidden="true">
     <img id="bootLogo" class="boot-logo" src="/static/img/brand-logo.png" alt="" />
@@ -31,9 +42,8 @@
             <h1>Launcher</h1>
           </div>
         </div>
-        <p class="tagline">Install tools, update, build, convert a game, then start it.</p>
+        <p class="tagline">Library for converted titles, convert dumps, build and update AnyPS5.</p>
         <div class="hero-actions">
-          <button class="btn primary" id="btnStart" type="button">Start game</button>
           <button class="btn ghost" id="btnUpdateCheck" type="button">Check updates</button>
         </div>
       </div>
@@ -50,9 +60,12 @@
           <span class="stat-label">Updates</span>
           <span class="stat-value" id="statUpdate">-</span>
         </div>
-        <div class="stat">
+        <div class="stat stat-build" id="statBuildWrap">
           <span class="stat-label">Build</span>
           <span class="stat-value" id="statBuild">-</span>
+          <div class="stat-mini-progress" id="statBuildProgress" hidden>
+            <div class="stat-mini-progress-fill" id="statBuildProgressFill"></div>
+          </div>
         </div>
       </div>
     </header>
@@ -60,16 +73,51 @@
     <div class="alerts" id="alerts" hidden></div>
 
     <nav class="tabs" role="tablist">
-      <button class="tab active" data-tab="setup" type="button">Setup</button>
-      <button class="tab" data-tab="controls" type="button">Controls</button>
+      <button class="tab" data-tab="library" type="button">Library</button>
       <button class="tab" data-tab="convert" type="button">Convert</button>
-      <button class="tab" data-tab="updates" type="button">Updates</button>
-      <button class="tab" data-tab="readme" type="button">README</button>
       <button class="tab" data-tab="build" type="button">Build</button>
+      <button class="tab" data-tab="updates" type="button">Updates</button>
+      <button class="tab" data-tab="settings" type="button">Settings</button>
+      <button class="tab active" data-tab="setup" type="button">Setup</button>
+      <button class="tab" data-tab="readme" type="button">README</button>
       <button class="tab" data-tab="log" type="button">Console</button>
     </nav>
 
     <main>
+      <section class="panel" id="tab-library">
+        <div class="panel-head row-between">
+          <div>
+            <h2>Library</h2>
+            <p>Converted titles you can play, and dumps ready to convert.</p>
+          </div>
+          <div class="action-row" style="margin:0">
+            <button class="btn compact ghost" id="btnLibraryScan" type="button">Scan for newly added games and download cover art</button>
+          </div>
+        </div>
+        <div class="library-progress" id="libraryProgressWrap" hidden>
+          <div class="setup-progress-meta">
+            <strong id="libraryProgressLabel">Scanning game folders</strong>
+            <span id="libraryProgressPct" class="mono">0%</span>
+          </div>
+          <div class="setup-progress-detail muted" id="libraryProgressDetail"></div>
+          <div class="setup-progress-bar" aria-hidden="true">
+            <div class="setup-progress-fill" id="libraryProgressFill"></div>
+          </div>
+        </div>
+        <div class="library-scroll">
+          <div class="library-section">
+            <h3 class="subhead">Converted <span class="muted" id="libraryConvertedCount">(0)</span> <span class="muted" id="libraryConvertedSize"></span></h3>
+            <div class="library-grid" id="libraryConverted"></div>
+            <p class="empty" id="libraryConvertedEmpty">No converted games yet. Set folders in Settings, then Convert a dump.</p>
+          </div>
+          <div class="library-section">
+            <h3 class="subhead">Unconverted <span class="muted" id="libraryUnconvertedCount">(0)</span> <span class="muted" id="libraryUnconvertedSize"></span></h3>
+            <div class="library-grid" id="libraryUnconverted"></div>
+            <p class="empty" id="libraryUnconvertedEmpty">No dumps found. Place decrypted game folders in your Unconverted Game Folder.</p>
+          </div>
+        </div>
+      </section>
+
       <section class="panel active" id="tab-setup">
         <div class="panel-head row-between">
           <div>
@@ -123,28 +171,6 @@
           </div>
         </div>
         <p class="hint"><span class="st-inline todo">next</span> = still needed. Already-installed tools show <span class="st-inline ok">ok</span>. Log in <strong>Console</strong>.</p>
-      </section>
-
-      <section class="panel" id="tab-controls">
-        <div class="panel-head row-between">
-          <div>
-            <h2>Controls</h2>
-            <p>Map keyboard and mouse. Controllers work automatically.</p>
-          </div>
-          <div class="action-row" style="margin:0">
-            <button class="btn compact" id="btnInputReset" type="button">Reset defaults</button>
-            <button class="btn compact primary" id="btnInputSave" type="button">Save</button>
-          </div>
-        </div>
-
-        <p class="listen-banner" id="listenHint" hidden></p>
-        <div class="key-grid" id="keyGrid"></div>
-        <div class="action-row">
-          <button class="btn compact" id="btnInputExportJson" type="button">Export</button>
-          <button class="btn compact" id="btnInputExportIni" type="button">Export INI</button>
-          <button class="btn compact" id="btnInputImport" type="button">Import</button>
-          <input id="inputImportFile" type="file" accept=".json,.ini,.txt" hidden />
-        </div>
       </section>
 
       <section class="panel" id="tab-convert">
@@ -217,6 +243,119 @@
           <div class="action-row">
             <button class="btn primary large" id="btnConvert" type="button">Convert</button>
             <button class="btn large" id="btnStart2" type="button">Start game</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="panel" id="tab-settings">
+        <div class="panel-head row-between">
+          <div>
+            <h2>Settings</h2>
+            <p>Changes save automatically. Library folders, converter defaults, and controls.</p>
+          </div>
+          <span class="badge" id="settingsSaveBadge" hidden>Saved</span>
+        </div>
+
+        <div class="settings-stack">
+          <div class="settings-block">
+            <h3 class="subhead">Library folders</h3>
+            <div class="form-grid">
+              <label class="field">
+                <span>Unconverted Game Folder</span>
+                <div class="row">
+                  <input id="unconvertedGamesRoot" type="text" placeholder="F:\PS5\Dumps" spellcheck="false" />
+                  <button class="btn compact" type="button" data-browse="unconvertedGamesRoot" data-kind="folder">Browse</button>
+                </div>
+              </label>
+              <label class="field">
+                <span>Converted Game Folder</span>
+                <div class="row">
+                  <input id="convertedGamesRoot" type="text" placeholder="F:\PS5\Converted" spellcheck="false" />
+                  <button class="btn compact" type="button" data-browse="convertedGamesRoot" data-kind="folder">Browse</button>
+                </div>
+              </label>
+            </div>
+            <p class="hint">Each game is one subfolder. Converted titles stay portable (art + meta saved inside the game folder).</p>
+          </div>
+
+          <div class="settings-block">
+            <h3 class="subhead">Logging</h3>
+            <div class="form-grid">
+              <label class="field">
+                <span>Log level</span>
+                <select id="settingsLogLevel">
+                  <option value="debug">Debug — everything (verbose)</option>
+                  <option value="info" selected>Info — normal (default)</option>
+                  <option value="warning">Warning — problems only</option>
+                  <option value="error">Error — failures only</option>
+                </select>
+              </label>
+            </div>
+            <p class="hint">Writes to <code>logs\launcher.log</code> next to the exe (library actions, convert, start, UI errors).</p>
+          </div>
+
+          <div class="settings-block">
+            <h3 class="subhead">Converter defaults</h3>
+            <p class="hint">Applied when you open Convert from the library (and as defaults for Convert).</p>
+            <div class="form-grid">
+              <div class="form-row-3">
+                <label class="field">
+                  <span>Output name</span>
+                  <input id="settingsOutputName" type="text" value="app.exe" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span>GPU name filter</span>
+                  <input id="settingsGpuFilter" type="text" placeholder="Optional, e.g. 5080" spellcheck="false" />
+                </label>
+                <label class="field">
+                  <span>Cleanup level</span>
+                  <select id="settingsUnusedFilter">
+                    <option value="0">Normal (safest)</option>
+                    <option value="1">Stronger</option>
+                    <option value="2">Strict</option>
+                  </select>
+                </label>
+              </div>
+              <div class="checks">
+                <label class="check">
+                  <input type="checkbox" id="settingsToIntel" />
+                  Intel CPU compatibility (use on Intel; leave off on AMD)
+                </label>
+                <label class="check">
+                  <input type="checkbox" id="settingsWindowsGui" />
+                  Hide console on converted .exe (Windows GUI subsystem)
+                </label>
+              </div>
+              <p class="hint">When converting, optional GUI subsystem. Separate from the play-time console below.</p>
+              <div class="checks" style="margin-top:0.65rem">
+                <label class="check">
+                  <input type="checkbox" id="settingsHideGameConsole" />
+                  Hide game console when playing
+                </label>
+              </div>
+              <p class="hint">Off (default): a separate console shows live game output. On: console is hidden and output goes to <span class="mono">logs\game-*.log</span>.</p>
+            </div>
+          </div>
+
+          <div class="settings-block">
+            <div class="row-between" style="align-items:flex-start;gap:0.75rem">
+              <div>
+                <h3 class="subhead">Controls</h3>
+                <p class="hint" style="margin-top:0.2rem">Map keyboard and mouse. Controllers work automatically.</p>
+              </div>
+              <div class="action-row" style="margin:0">
+                <button class="btn compact" id="btnInputReset" type="button">Reset defaults</button>
+                <button class="btn compact primary" id="btnInputSave" type="button">Save</button>
+              </div>
+            </div>
+            <p class="listen-banner" id="listenHint" hidden></p>
+            <div class="key-grid" id="keyGrid"></div>
+            <div class="action-row">
+              <button class="btn compact" id="btnInputExportJson" type="button">Export</button>
+              <button class="btn compact" id="btnInputExportIni" type="button">Export INI</button>
+              <button class="btn compact" id="btnInputImport" type="button">Import</button>
+              <input id="inputImportFile" type="file" accept=".json,.ini,.txt" hidden />
+            </div>
           </div>
         </div>
       </section>
@@ -356,6 +495,6 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/marked@15.0.7/marked.min.js"></script>
-  <script src="/static/js/launcher.js?v=26"></script>
+  <script src="/static/js/launcher.js?v=29"></script>
 </body>
 </html>
