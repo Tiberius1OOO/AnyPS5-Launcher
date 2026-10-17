@@ -4,7 +4,7 @@ Windows desktop launcher for **[AnyPS5](https://github.com/boykopovar/AnyPS5)**.
 
 This repo is the **launcher only**. It installs tools, clones AnyPS5 next to the app, builds the converter, manages a game library, converts titles, and starts them from a local UI.
 
-**Current release:** [v1.4.0](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
+**Current release:** [v1.4.1](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
 
 ---
 
@@ -40,10 +40,11 @@ Your game shelf. Converted titles show a **Play** badge; dumps show **Convert**.
 |---------|----------------|
 | Cover grid | Local art from `anyps5-art/` (and online cover download when scanning) |
 | Hover backdrop | Soft background art while you move across cards |
-| Instant load | Saves `library-cache.json` so the next start is immediate (quick "still there?" check) |
+| Instant load | Saves `library-cache.json` so the next start is immediate |
+| Live probe | Every 2 seconds: drop deleted folders, add portable games that already have `anyps5-library.json`, pause while a game is running |
 | First time scan | Only when folders are set and nothing has been scanned yet |
-| Scan button | **Scan for newly added games and download cover art**. Adds new folders only; skips games that already have covers |
-| Folder sizes | Totals next to Converted / Unconverted after sizes are known |
+| Scan button | **Scan for newly added games and download cover art**. For dumps without metadata yet; skips games that already have covers |
+| Folder sizes | Cached per game and shown instantly. Totals are the sum of cached sizes (delete a game and its size drops out of the total) |
 
 Click a converted card to **Play** (locks the UI while the game runs). Click an unconverted card to jump to **Convert** with paths prefilled.
 
@@ -203,6 +204,12 @@ Output: `dist\release\AnyPS5-Launcher\` and `AnyPS5-Launcher-windows.zip`.
 ---
 
 ## Changelog (launcher)
+
+### v1.4.1
+
+- Live library probe every 2s (paused while a game is running)
+- Portable games with `anyps5-library.json` appear instantly; dumps without metadata show a "Scan now" notice
+- Folder sizes cached and shown on load; totals update when a game is removed
 
 ### v1.4.0
 

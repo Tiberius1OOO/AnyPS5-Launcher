@@ -2725,6 +2725,65 @@ def api_library():
             "library": library,
             "progress": get_progress(),
             "needsFirstScan": first,
+            "pendingNew": library.get("pendingNew") or [],
+            "fingerprint": library.get("fingerprint") or "",
+        }
+    )
+
+
+@app.get("/api/library/probe")
+def api_library_probe():
+    """Cheap live library sync (every few seconds from the UI)."""
+    from library import get_progress, live_probe_library, needs_first_scan
+
+    import game_session
+
+    if game_session.is_running():
+        from library import get_last_scan
+
+        lib = get_last_scan()
+        return jsonify(
+            {
+                "ok": True,
+                "paused": True,
+                "changed": False,
+                "library": lib,
+                "pendingNew": lib.get("pendingNew") or [],
+                "fingerprint": lib.get("fingerprint") or "",
+                "progress": get_progress(),
+            }
+        )
+    if _job.get("running"):
+        from library import get_last_scan
+
+        lib = get_last_scan()
+        return jsonify(
+            {
+                "ok": True,
+                "paused": True,
+                "changed": False,
+                "library": lib,
+                "pendingNew": lib.get("pendingNew") or [],
+                "fingerprint": lib.get("fingerprint") or "",
+                "progress": get_progress(),
+            }
+        )
+    cfg = load_config()
+    conv = cfg.get("convertedGamesRoot") or ""
+    unconv = cfg.get("unconvertedGamesRoot") or ""
+    result = live_probe_library(conv, unconv, persist=True)
+    return jsonify(
+        {
+            "ok": True,
+            "paused": False,
+            "changed": bool(result.get("changed")),
+            "library": result.get("library") or {},
+            "pendingNew": result.get("pendingNew") or [],
+            "fingerprint": result.get("fingerprint") or "",
+            "imported": int(result.get("imported") or 0),
+            "removed": int(result.get("removed") or 0),
+            "needsFirstScan": needs_first_scan(conv, unconv),
+            "progress": get_progress(),
         }
     )
 
@@ -2778,7 +2837,7 @@ def api_library_scan():
     applog.info("Library scan " + ("started" if started else "already running"))
     msg = {
         "first": "First time scan started",
-        "incremental": "Scanning for newly added games…",
+        "incremental": "Scanning for newly added games...",
         "full": "Full library scan started",
     }.get(mode, "Scan started")
     return jsonify(

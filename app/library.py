@@ -69,8 +69,12 @@ _last_scan: dict[str, Any] = {
 }
 
 _scan_thread: threading.Thread | None = None
+_size_fill_thread: threading.Thread | None = None
 _cache_path: Path | None = None
 _library_ready = False
+_pending_new: list[dict[str, Any]] = []
+_size_fill_lock = threading.Lock()
+_size_fill_running = False
 
 
 def configure_cache(data_dir: Path | str) -> None:
@@ -98,6 +102,8 @@ def get_last_scan() -> dict[str, Any]:
             "convertedTotalLabel": _last_scan.get("convertedTotalLabel") or "",
             "unconvertedTotalLabel": _last_scan.get("unconvertedTotalLabel") or "",
             "initialScanDone": bool(_last_scan.get("initialScanDone")),
+            "pendingNew": list(_pending_new),
+            "fingerprint": str(_last_scan.get("fingerprint") or ""),
         }
 
 
@@ -764,6 +770,11 @@ def _entry_from_dir(
             size_b = 0
     else:
         size_b = 0
+    if size_b > 0:
+        try:
+            save_sidecar(game_dir, {"sizeBytes": size_b})
+        except Exception:
+            pass
     return {
         "id": gid,
         "kind": kind,
@@ -780,7 +791,7 @@ def _entry_from_dir(
         "lastPlayedAt": side.get("lastPlayedAt") or "",
         "folderName": game_dir.name,
         "sizeBytes": size_b,
-        "sizeLabel": format_size_gb(size_b),
+        "sizeLabel": format_size_gb(size_b) if size_b else "",
     }
 
 
@@ -907,8 +918,13 @@ def load_library_cache() -> dict[str, Any] | None:
         return None
 
 
+def has_portable_metadata(game_dir: Path) -> bool:
+    """True when the folder carries AnyPS5 launcher metadata (instant integrate)."""
+    return (Path(game_dir) / SIDECAR_NAME).is_file()
+
+
 def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None:
-    """Build a library card from sidecar/art only — no folder walk, no downloads."""
+    """Build a library card from sidecar/art only. No folder walk, no downloads."""
     game_dir = Path(game_dir)
     if not game_dir.is_dir():
         return None
@@ -924,7 +940,6 @@ def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None
             backdrop_rel = f"{ART_DIR_NAME}/{BACKDROP_NAME}"
         elif cover_rel:
             backdrop_rel = cover_rel
-    # Prefer sidecar; otherwise only accept if this still looks like a game folder
     if not side and kind == "converted" and not _find_exe(game_dir):
         return None
     if not side and kind == "unconverted" and not (
@@ -936,6 +951,7 @@ def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None
         return None
     gid = stable_id(game_dir)
     cover_url, backdrop_url = _cover_urls(game_dir, gid, cover_rel, backdrop_rel)
+    size_b = int(side.get("sizeBytes") or 0)
     return {
         "id": gid,
         "kind": kind,
@@ -951,11 +967,26 @@ def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None
         "backdropUrl": backdrop_url,
         "lastPlayedAt": side.get("lastPlayedAt") or "",
         "folderName": game_dir.name,
-        "sizeBytes": int(side.get("sizeBytes") or 0),
-        "sizeLabel": format_size_gb(int(side.get("sizeBytes") or 0))
-        if side.get("sizeBytes")
-        else "",
+        "sizeBytes": size_b,
+        "sizeLabel": format_size_gb(size_b) if size_b else "",
     }
+
+
+def _library_fingerprint(
+    converted: list[dict],
+    unconverted: list[dict],
+    pending: list[dict] | None = None,
+) -> str:
+    parts: list[str] = []
+    for bucket in (converted, unconverted):
+        for g in bucket:
+            parts.append(
+                f"{g.get('id')}:{g.get('sizeBytes')}:{g.get('cover')}:{g.get('path')}"
+            )
+    for p in pending or []:
+        parts.append(f"pending:{p.get('path')}")
+    raw = "|".join(parts)
+    return hashlib.sha1(raw.encode("utf-8", errors="replace")).hexdigest()[:16]
 
 
 def list_game_dirs(
@@ -1087,17 +1118,15 @@ def ensure_library_ready(
     converted_root: str | Path,
     unconverted_root: str | Path,
 ) -> dict[str, Any]:
-    """Load cache (or quick-index) into memory. Always cheap — never a full art scan."""
+    """Load cache (or quick-index) into memory. Always cheap, never a full art scan."""
     global _library_ready
     conv = str(converted_root or "")
     unconv = str(unconverted_root or "")
 
     cached = load_library_cache()
     if cached and _roots_match(cached, conv, unconv) and cached.get("initialScanDone"):
-        result = probe_library(conv, unconv, cached)
-        with _last_scan_lock:
-            _last_scan.clear()
-            _last_scan.update(result)
+        # Full live probe (drop missing, import portable, pending list)
+        live_probe_library(conv, unconv, persist=True)
         _library_ready = True
         return get_last_scan()
 
@@ -1109,16 +1138,246 @@ def ensure_library_ready(
             quick = _empty_library(conv, unconv)
         if quick.get("converted") or quick.get("unconverted"):
             quick["initialScanDone"] = True
+            quick["fingerprint"] = _library_fingerprint(
+                quick.get("converted") or [],
+                quick.get("unconverted") or [],
+                [],
+            )
             _apply_scan_result(quick)
             _library_ready = True
+            start_missing_size_fill_async()
             return get_last_scan()
 
     empty = _empty_library(conv, unconv)
+    empty["fingerprint"] = _library_fingerprint([], [], [])
     with _last_scan_lock:
         _last_scan.clear()
         _last_scan.update(empty)
     _library_ready = True
     return get_last_scan()
+
+
+def live_probe_library(
+    converted_root: str | Path = "",
+    unconverted_root: str | Path = "",
+    *,
+    persist: bool = True,
+) -> dict[str, Any]:
+    """Cheap live sync: drop missing games, import portable metadata, list pending.
+
+    Totals are the sum of each card's cached sizeBytes (delete = remove that size).
+    """
+    global _pending_new
+    conv = str(converted_root or "")
+    unconv = str(unconverted_root or "")
+    if not conv.strip() and not unconv.strip():
+        data = get_last_scan()
+        return {
+            "library": data,
+            "changed": False,
+            "pendingNew": [],
+            "fingerprint": data.get("fingerprint") or "",
+            "imported": 0,
+            "removed": 0,
+        }
+
+    prev = get_last_scan()
+    prev_pending = list(_pending_new)
+    cached = load_library_cache()
+    if (
+        not prev.get("initialScanDone")
+        or (not prev.get("converted") and not prev.get("unconverted") and cached)
+    ):
+        if cached and _roots_match(cached, conv, unconv):
+            prev = probe_library(conv, unconv, cached)
+            prev["initialScanDone"] = bool(cached.get("initialScanDone"))
+        elif not prev.get("initialScanDone"):
+            return {
+                "library": prev,
+                "changed": False,
+                "pendingNew": list(_pending_new),
+                "fingerprint": prev.get("fingerprint") or "",
+                "imported": 0,
+                "removed": 0,
+            }
+
+    prev_fp = str(prev.get("fingerprint") or "")
+    kept_converted: list[dict] = []
+    kept_unconverted: list[dict] = []
+    kept_paths: set[str] = set()
+    removed = 0
+
+    for bucket, out in (
+        ("converted", kept_converted),
+        ("unconverted", kept_unconverted),
+    ):
+        for entry in prev.get(bucket) or []:
+            refreshed = _refresh_cached_entry(dict(entry))
+            if refreshed:
+                out.append(refreshed)
+                try:
+                    kept_paths.add(str(Path(refreshed["path"]).resolve()).lower())
+                except Exception:
+                    kept_paths.add(str(refreshed.get("path") or "").lower())
+            else:
+                removed += 1
+
+    pending: list[dict[str, Any]] = []
+    imported = 0
+
+    for root in (conv, unconv):
+        if not str(root or "").strip():
+            continue
+        for child in list_child_dirs(Path(root)):
+            try:
+                key = str(child.resolve()).lower()
+            except Exception:
+                key = str(child).lower()
+            if key in kept_paths:
+                continue
+            classified = _quick_classify_child(child)
+            if not classified:
+                continue
+            if has_portable_metadata(child):
+                entry = _entry_from_sidecar_fast(child, classified)
+                if not entry:
+                    continue
+                if classified == "converted":
+                    kept_converted.append(entry)
+                else:
+                    kept_unconverted.append(entry)
+                kept_paths.add(key)
+                imported += 1
+            else:
+                try:
+                    pstr = str(child.resolve())
+                except Exception:
+                    pstr = str(child)
+                pending.append(
+                    {
+                        "path": pstr,
+                        "folderName": child.name,
+                        "kind": classified,
+                        "title": child.name,
+                    }
+                )
+
+    kept_converted.sort(
+        key=lambda g: str(g.get("title") or g.get("folderName") or "").lower()
+    )
+    kept_unconverted.sort(
+        key=lambda g: str(g.get("title") or g.get("folderName") or "").lower()
+    )
+    fp = _library_fingerprint(kept_converted, kept_unconverted, pending)
+    result = _finalize_totals(
+        {
+            "converted": kept_converted,
+            "unconverted": kept_unconverted,
+            "scannedAt": prev.get("scannedAt")
+            or datetime.now(timezone.utc).isoformat(),
+            "convertedRoot": _norm_root(conv),
+            "unconvertedRoot": _norm_root(unconv),
+            "initialScanDone": True,
+            "fingerprint": fp,
+        }
+    )
+    _pending_new = pending
+    changed = fp != prev_fp
+
+    with _last_scan_lock:
+        _last_scan.clear()
+        _last_scan.update(result)
+    if changed and persist:
+        save_library_cache(result)
+
+    if any(
+        int(g.get("sizeBytes") or 0) <= 0
+        for g in kept_converted + kept_unconverted
+    ):
+        start_missing_size_fill_async()
+
+    lib = get_last_scan()
+    return {
+        "library": lib,
+        "changed": changed,
+        "pendingNew": list(pending),
+        "fingerprint": fp,
+        "imported": imported,
+        "removed": removed,
+        "pendingChanged": [
+            str(p.get("path") or "").lower() for p in pending
+        ]
+        != [str(p.get("path") or "").lower() for p in prev_pending],
+    }
+
+
+def start_missing_size_fill_async() -> bool:
+    """Background: compute sizeBytes for library cards that still have 0."""
+    global _size_fill_thread, _size_fill_running
+    with _size_fill_lock:
+        if _size_fill_running:
+            return False
+        _size_fill_running = True
+
+    def run() -> None:
+        global _size_fill_running
+        try:
+            data = get_last_scan()
+            updated = False
+            for bucket in ("converted", "unconverted"):
+                games = list(data.get(bucket) or [])
+                for idx, g in enumerate(games):
+                    if int(g.get("sizeBytes") or 0) > 0:
+                        continue
+                    path = Path(str(g.get("path") or ""))
+                    if not path.is_dir():
+                        continue
+                    try:
+                        size_b = folder_size_bytes(path)
+                    except Exception:
+                        size_b = 0
+                    if size_b <= 0:
+                        continue
+                    g = dict(g)
+                    g["sizeBytes"] = size_b
+                    g["sizeLabel"] = format_size_gb(size_b)
+                    games[idx] = g
+                    try:
+                        save_sidecar(path, {"sizeBytes": size_b})
+                    except Exception:
+                        pass
+                    updated = True
+                    # Publish incrementally so the UI can pick up sizes
+                    with _last_scan_lock:
+                        cur = list(_last_scan.get(bucket) or [])
+                        for i, existing in enumerate(cur):
+                            if existing.get("id") == g.get("id"):
+                                cur[i] = g
+                                break
+                        _last_scan[bucket] = cur
+                        _finalize_totals(_last_scan)
+                        _last_scan["fingerprint"] = _library_fingerprint(
+                            list(_last_scan.get("converted") or []),
+                            list(_last_scan.get("unconverted") or []),
+                            list(_pending_new),
+                        )
+                    save_library_cache(get_last_scan())
+            if updated:
+                try:
+                    import applog
+
+                    applog.debug("Library size fill complete")
+                except Exception:
+                    pass
+        finally:
+            with _size_fill_lock:
+                _size_fill_running = False
+
+    _size_fill_thread = threading.Thread(
+        target=run, daemon=True, name="library-size-fill"
+    )
+    _size_fill_thread.start()
+    return True
 
 
 def list_child_dirs(root: Path) -> list[Path]:

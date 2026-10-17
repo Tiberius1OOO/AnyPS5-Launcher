@@ -19,6 +19,9 @@
   let launcherUpdateBusy = false;
   let launcherUpdateResolve = null; // unblock boot after Update / Keep
   let libraryProgressTimer = null;
+  let libraryProbeTimer = null;
+  let libraryFingerprint = "";
+  let libraryPendingKey = "";
   let libraryData = { converted: [], unconverted: [] };
   let audioCtx = null;
   let libraryScannedOnce = false;
@@ -349,10 +352,37 @@
     }
   }
 
+  function renderPendingNew(pending) {
+    const banner = $("libraryPendingBanner");
+    const text = $("libraryPendingText");
+    if (!banner) return;
+    const list = Array.isArray(pending) ? pending : [];
+    if (!list.length) {
+      banner.hidden = true;
+      libraryPendingKey = "";
+      return;
+    }
+    banner.hidden = false;
+    const names = list.slice(0, 4).map((p) => p.folderName || p.title || "game").join(", ");
+    const more = list.length > 4 ? ` (+${list.length - 4} more)` : "";
+    if (text) {
+      text.textContent = list.length === 1
+        ? `New game found (${names}) but it has no AnyPS5 metadata yet. Press Scan to add it and download cover art.`
+        : `${list.length} new games found without AnyPS5 metadata (${names}${more}). Press Scan to integrate them.`;
+    }
+    const key = list.map((p) => p.path || p.folderName).sort().join("|");
+    if (key && key !== libraryPendingKey) {
+      libraryPendingKey = key;
+      clientLog("info", "Pending new games (need Scan)", String(list.length));
+    }
+  }
+
   async function loadLibrary(quiet = true) {
     try {
       const data = await api("/api/library");
       renderLibrary(data.library || {});
+      renderPendingNew(data.pendingNew || (data.library && data.library.pendingNew) || []);
+      libraryFingerprint = data.fingerprint || (data.library && data.library.fingerprint) || "";
       if (data.progress) renderLibraryProgress(data.progress);
       if (data.library && data.library.initialScanDone) libraryScannedOnce = true;
       return data;
@@ -360,6 +390,50 @@
       if (!quiet) toast(e.message, "error");
       return null;
     }
+  }
+
+  function stopLibraryProbe() {
+    if (libraryProbeTimer) {
+      clearInterval(libraryProbeTimer);
+      libraryProbeTimer = null;
+    }
+  }
+
+  async function tickLibraryProbe() {
+    if (document.body.classList.contains("game-running") || playInFlight) return;
+    if (libraryScanRunning || jobRunning) return;
+    const hasRoots = !!(($("convertedGamesRoot")?.value || "").trim()
+      || ($("unconvertedGamesRoot")?.value || "").trim());
+    if (!hasRoots) return;
+    try {
+      const data = await api("/api/library/probe");
+      if (data.paused) return;
+      const fp = data.fingerprint || "";
+      const pending = data.pendingNew || [];
+      renderPendingNew(pending);
+      if (data.changed || (fp && fp !== libraryFingerprint)) {
+        libraryFingerprint = fp;
+        renderLibrary(data.library || {});
+        if (data.imported > 0) {
+          toast(
+            data.imported === 1
+              ? "Added 1 game from portable metadata"
+              : `Added ${data.imported} games from portable metadata`,
+            "ok",
+          );
+        }
+      } else if (data.library && data.library.convertedTotalLabel !== libraryData.convertedTotalLabel) {
+        // Size fill may update totals without fingerprint race
+        renderLibrary(data.library);
+      }
+      if (data.library && data.library.initialScanDone) libraryScannedOnce = true;
+    } catch (_) {}
+  }
+
+  function startLibraryProbe() {
+    stopLibraryProbe();
+    libraryProbeTimer = setInterval(tickLibraryProbe, 2000);
+    tickLibraryProbe();
   }
 
   function stopLibraryProgressPoll() {
@@ -406,8 +480,8 @@
       libraryScannedOnce = true;
       if (toastOnStart) {
         const startedMsg = mode === "first"
-          ? "First time scan…"
-          : (data.message || "Scanning for newly added games…");
+          ? "First time scan..."
+          : (data.message || "Scanning for newly added games...");
         toast(data.started ? startedMsg : (data.message || "Scan running"), "ok");
       }
       renderLibraryProgress(data.progress);
@@ -425,6 +499,7 @@
   async function ensureLibraryOnOpen() {
     bindLibraryGridClicks();
     const data = await loadLibrary(true);
+    startLibraryProbe();
     if (!data) return;
     const hasRoots = !!(($("convertedGamesRoot")?.value || "").trim()
       || ($("unconvertedGamesRoot")?.value || "").trim());
@@ -484,7 +559,7 @@
     const lock = $("gameLock");
     if (!lock) return;
     const running = !!(game && game.running);
-    const starting = !!(game && game.starting) || (running && (game.pid == null || game.pid === "" || game.pid === "…"));
+      const starting = !!(game && game.starting) || (running && (game.pid == null || game.pid === "" || game.pid === "…" || game.pid === "..."));
     lock.hidden = !running;
     lock.classList.toggle("is-starting", starting);
     document.body.classList.toggle("game-running", running);
@@ -495,7 +570,7 @@
       if (!running) {
         $("gameLockTitle").textContent = "Started";
       } else if (starting) {
-        $("gameLockTitle").textContent = `Starting ${game.title || "game"}…`;
+        $("gameLockTitle").textContent = `Starting ${game.title || "game"}...`;
       } else {
         $("gameLockTitle").textContent = `${game.title || "Game"} started and running`;
       }
@@ -504,18 +579,18 @@
       if (!running) {
         $("gameLockDetail").textContent = "Close the game to unlock the launcher.";
       } else if (starting) {
-        $("gameLockDetail").textContent = "Preparing runtimes and launching — please wait…";
+        $("gameLockDetail").textContent = "Preparing runtimes and launching. Please wait...";
       } else if (game.logPath) {
         $("gameLockDetail").textContent =
-          `PID ${game.pid || "—"} · log: ${String(game.logPath).split(/[/\\\\]/).pop()}`;
+          `PID ${game.pid || "-"} · log: ${String(game.logPath).split(/[/\\\\]/).pop()}`;
       } else {
         $("gameLockDetail").textContent =
-          `PID ${game.pid || "—"} · Close the game to unlock the launcher.`;
+          `PID ${game.pid || "-"} · Close the game to unlock the launcher.`;
       }
     }
     if ($("jobStatus") && running) {
       $("jobStatus").textContent = starting
-        ? `Starting ${game.title || "game"}…`
+        ? `Starting ${game.title || "game"}...`
         : `Game ${game.title || ""} started and running`;
     }
   }
@@ -540,6 +615,7 @@
           if ($("jobStatus") && !jobRunning) $("jobStatus").textContent = "Ready";
           clientLog("info", "Game session ended", g.title || "");
           toast(g.title ? `${g.title} closed` : "Game closed", "ok");
+          startLibraryProbe();
         }
       } catch (_) {}
     };
@@ -555,11 +631,12 @@
     if (!guardHeavyAction("starting a game")) return;
     playInFlight = true;
     // Immediate lock so rapid clicks cannot queue more launches
+    stopLibraryProbe();
     setGameLock({
       running: true,
       starting: true,
       title: game.title || "Game",
-      pid: "…",
+      pid: "...",
       logPath: "",
     });
     try {
@@ -1557,7 +1634,8 @@
     }
     if (!guardHeavyAction("starting a game")) return;
     playInFlight = true;
-    setGameLock({ running: true, starting: true, title: "Game", pid: "…", logPath: "" });
+    stopLibraryProbe();
+    setGameLock({ running: true, starting: true, title: "Game", pid: "...", logPath: "" });
     try {
       await savePrefs();
       const data = await api("/api/start", {
@@ -1614,6 +1692,11 @@
     fetchRemote: true,
     mode: "incremental",
   }));
+  on("btnLibraryScanPending", "click", () => scanLibraryFolders({
+    toastOnStart: true,
+    fetchRemote: true,
+    mode: "incremental",
+  }));
   on("btnGameStop", "click", async () => {
     try {
       const data = await api("/api/game/stop", { method: "POST", body: "{}" });
@@ -1621,6 +1704,7 @@
       playInFlight = false;
       stopGamePoll();
       toast("Game stop requested", "ok");
+      startLibraryProbe();
     } catch (e) {
       toast(e.message, "error");
     }

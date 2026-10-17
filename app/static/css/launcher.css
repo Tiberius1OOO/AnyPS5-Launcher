@@ -1075,6 +1075,23 @@ body.game-running .shell {
   min-height: 0;
   overflow: hidden;
 }
+.library-pending {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin: 0 0 0.75rem;
+  padding: 0.65rem 0.85rem;
+  border: 1px solid rgba(250, 204, 21, 0.35);
+  border-radius: 12px;
+  background: rgba(40, 32, 8, 0.55);
+}
+.library-pending[hidden] { display: none !important; }
+.library-pending p {
+  margin: 0;
+  font-size: 0.92rem;
+}
 .library-progress {
   flex: 0 0 auto;
   margin: 0 0 0.75rem;
