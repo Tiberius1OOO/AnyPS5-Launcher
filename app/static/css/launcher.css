@@ -503,6 +503,14 @@ select option { background: #0d1219; }
   white-space: pre-wrap;
   word-break: break-word;
 }
+.console .console-err {
+  color: #fb7185;
+  font-weight: 600;
+}
+.console .console-err-title {
+  color: #fda4af;
+  font-weight: 700;
+}
 
 .foot {
   flex: 0 0 auto;

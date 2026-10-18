@@ -1183,11 +1183,68 @@
     return job;
   }
 
+  function isConsoleErrorLead(line) {
+    const t = String(line || "").trimStart();
+    return (
+      /^ERROR:/i.test(t)
+      || /^\[ABBRUCH\]/i.test(t)
+      || /^What failed:/i.test(t)
+      || /^Why:/i.test(t)
+      || /^What to do:/i.test(t)
+      || /^Skipped examples:/i.test(t)
+      || /^Likely cause/i.test(t)
+      || /^Full log file/i.test(t)
+      || /^Same log beside/i.test(t)
+      || /^Log folder:/i.test(t)
+      || /^The line 'ERROR:/i.test(t)
+    );
+  }
+
+  function renderConsoleLines(lines) {
+    const el = $("console");
+    if (!el) return;
+    if (!lines || !lines.length) {
+      if (!el.textContent || el.textContent === "...") el.textContent = "...";
+      return;
+    }
+    let inErr = false;
+    const parts = [];
+    for (const raw of lines) {
+      const line = String(raw);
+      const trimmed = line.trimStart();
+      if (isConsoleErrorLead(line)) {
+        inErr = true;
+      } else if (inErr) {
+        const cont =
+          line.startsWith("  ")
+          || trimmed === ""
+          || /^\d+\.\s/.test(trimmed)
+          || trimmed.startsWith("…");
+        if (!cont && trimmed !== "") {
+          inErr = false;
+        }
+      }
+      if (/^=== aborted ===/i.test(trimmed)) {
+        inErr = true;
+      }
+      const cls = inErr
+        ? (/^ERROR:/i.test(trimmed) ? "console-err console-err-title" : "console-err")
+        : "";
+      if (cls) {
+        parts.push(`<span class="${cls}">${escapeHtml(line)}</span>`);
+      } else {
+        parts.push(escapeHtml(line));
+      }
+    }
+    el.innerHTML = parts.join("\n");
+  }
+
   async function pollJobOnce() {
     let job = await api("/api/job");
     job = await enrichJobWithSetupProgress(job);
     const lines = job.lines || [];
-    $("console").textContent = lines.length ? lines.join("\n") : ($("console").textContent || "...");
+    if (lines.length) renderConsoleLines(lines);
+    else if (!$("console").textContent) $("console").textContent = "...";
     $("console").scrollTop = $("console").scrollHeight;
     lastLineCount = lines.length;
     renderJobProgress(job);
@@ -1278,7 +1335,8 @@
     } catch (e) {
       setBusy(false);
       showTab("log");
-      $("console").textContent += `\nERROR: ${e.message}\n`;
+      const prev = ($("console").textContent || "").split("\n").filter((x) => x !== "");
+      renderConsoleLines([...prev, "", `ERROR: ${e.message}`, ""]);
       toast(e.message, "error");
     }
   }
