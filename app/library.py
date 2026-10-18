@@ -6,6 +6,8 @@ import json
 import os
 import re
 import shutil
+import subprocess
+import sys
 import threading
 import time
 import urllib.error
@@ -20,6 +22,14 @@ ART_DIR_NAME = "anyps5-art"
 COVER_NAME = "icon0.png"
 BACKDROP_NAME = "backdrop.png"
 LIBRARY_CACHE_NAME = "library-cache.json"
+
+# Written into anyps5-library.json while / after Convert
+CONVERT_STATUS_OK = "ok"
+CONVERT_STATUS_IN_PROGRESS = "in_progress"
+CONVERT_STATUS_FAILED = "failed"
+CONVERT_INCOMPLETE_STATUSES = frozenset(
+    {CONVERT_STATUS_IN_PROGRESS, CONVERT_STATUS_FAILED, "broken", "unfinished"}
+)
 
 TITLE_ID_RE = re.compile(r"\b((?:PPSA|CUSA|NPXS|PSPE)[0-9]{4,6})\b", re.I)
 PROSPERO_CDN_RE = re.compile(
@@ -169,6 +179,126 @@ def save_sidecar(game_dir: Path, data: dict) -> None:
     cur.update(data)
     cur["updatedAt"] = datetime.now(timezone.utc).isoformat()
     _write_json(game_dir / SIDECAR_NAME, cur)
+
+
+def get_convert_status(game_dir: Path | dict) -> str:
+    if isinstance(game_dir, dict):
+        return str(game_dir.get("convertStatus") or "").strip().lower()
+    side = load_sidecar(Path(game_dir))
+    return str(side.get("convertStatus") or "").strip().lower()
+
+
+def is_incomplete_convert(game_dir: Path | dict) -> bool:
+    status = get_convert_status(game_dir)
+    if status in CONVERT_INCOMPLETE_STATUSES:
+        return True
+    if isinstance(game_dir, dict):
+        kind = str(game_dir.get("kind") or "")
+        exe = str(game_dir.get("exePath") or "")
+        if kind == "converted" and not exe and status != CONVERT_STATUS_OK:
+            return True
+        return False
+    path = Path(game_dir)
+    side = load_sidecar(path)
+    if str(side.get("kind") or "") == "converted" and not _find_exe(path):
+        return True
+    if side.get("sourceGameRoot") and not _find_exe(path) and not is_unconverted_dir(path):
+        return True
+    return False
+
+
+def begin_convert_sidecar(
+    output_dir: Path,
+    *,
+    game_root: Path | None = None,
+    title: str = "",
+    title_id: str = "",
+    version: str = "",
+) -> None:
+    """Create output folder + sidecar only when Convert actually starts."""
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload: dict[str, Any] = {
+        "kind": "converted",
+        "convertStatus": CONVERT_STATUS_IN_PROGRESS,
+        "convertPhase": "starting",
+        "convertError": "",
+        "convertStartedAt": datetime.now(timezone.utc).isoformat(),
+        "convertFinishedAt": "",
+    }
+    if title:
+        payload["title"] = title
+    if title_id:
+        payload["titleId"] = title_id
+    if version:
+        payload["version"] = version
+    if game_root is not None:
+        try:
+            payload["sourceGameRoot"] = str(Path(game_root).resolve())
+        except Exception:
+            payload["sourceGameRoot"] = str(game_root)
+        if not title or not title_id:
+            try:
+                src = inspect_game_folder(Path(game_root))
+                payload.setdefault("title", src.get("title") or output_dir.name)
+                payload.setdefault("titleId", src.get("titleId") or "")
+                payload.setdefault("version", src.get("version") or "")
+            except Exception:
+                pass
+    save_sidecar(output_dir, payload)
+
+
+def update_convert_sidecar(
+    output_dir: Path,
+    *,
+    phase: str = "",
+    status: str = "",
+    error: str = "",
+) -> None:
+    output_dir = Path(output_dir)
+    if not output_dir.is_dir():
+        return
+    patch: dict[str, Any] = {}
+    if phase:
+        patch["convertPhase"] = phase
+    if status:
+        patch["convertStatus"] = status
+    if error:
+        patch["convertError"] = error
+    if patch:
+        save_sidecar(output_dir, patch)
+
+
+def mark_convert_failed(output_dir: Path, error: str, *, phase: str = "") -> None:
+    output_dir = Path(output_dir)
+    if not output_dir.is_dir():
+        return
+    patch: dict[str, Any] = {
+        "kind": "converted",
+        "convertStatus": CONVERT_STATUS_FAILED,
+        "convertError": (error or "Convert failed")[:500],
+        "convertFinishedAt": datetime.now(timezone.utc).isoformat(),
+    }
+    if phase:
+        patch["convertPhase"] = phase
+    save_sidecar(output_dir, patch)
+
+
+def mark_convert_ok(output_dir: Path, *, phase: str = "done") -> None:
+    """Mark convert finished OK without re-running artwork/metadata finalize."""
+    output_dir = Path(output_dir)
+    if not output_dir.is_dir():
+        return
+    save_sidecar(
+        output_dir,
+        {
+            "kind": "converted",
+            "convertStatus": CONVERT_STATUS_OK,
+            "convertPhase": phase,
+            "convertError": "",
+            "convertFinishedAt": datetime.now(timezone.utc).isoformat(),
+        },
+    )
 
 
 def find_input_elf(game_root: Path) -> Path | None:
@@ -775,6 +905,20 @@ def _entry_from_dir(
             save_sidecar(game_dir, {"sizeBytes": size_b})
         except Exception:
             pass
+    cfields = _convert_fields_from_side(side)
+    status = cfields["convertStatus"]
+    playable = bool(exe) and status in ("", CONVERT_STATUS_OK)
+    if kind == "converted" and not exe and status in CONVERT_INCOMPLETE_STATUSES:
+        playable = False
+    elif kind == "converted" and not exe and (
+        str(side.get("kind") or "") == "converted" or side.get("sourceGameRoot")
+    ):
+        status = status or CONVERT_STATUS_FAILED
+        cfields["convertStatus"] = status
+        cfields["convertError"] = cfields["convertError"] or (
+            "Convert unfinished or broken (no .exe). Delete this folder and Convert again."
+        )
+        playable = False
     return {
         "id": gid,
         "kind": kind,
@@ -792,6 +936,8 @@ def _entry_from_dir(
         "folderName": game_dir.name,
         "sizeBytes": size_b,
         "sizeLabel": format_size_gb(size_b) if size_b else "",
+        **cfields,
+        "playable": playable,
     }
 
 
@@ -816,8 +962,28 @@ def _refresh_cached_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
             backdrop_rel = cover_rel
     cover_url, backdrop_url = _cover_urls(path, gid, cover_rel, backdrop_rel)
     exe = _find_exe(path) if kind == "converted" else None
-    if kind == "converted" and exe is None:
+    side = load_sidecar(path)
+    cfields = _convert_fields_from_side(side)
+    status = cfields["convertStatus"] or str(entry.get("convertStatus") or "").lower()
+    incomplete = status in CONVERT_INCOMPLETE_STATUSES or (
+        kind == "converted"
+        and exe is None
+        and (
+            str(side.get("kind") or "") == "converted"
+            or bool(side.get("sourceGameRoot"))
+            or bool(entry.get("convertStatus"))
+        )
+    )
+    if kind == "converted" and exe is None and not incomplete:
         return None
+    if incomplete and not status:
+        status = CONVERT_STATUS_FAILED
+        cfields["convertStatus"] = status
+        cfields["convertError"] = cfields["convertError"] or str(
+            entry.get("convertError") or ""
+        ) or (
+            "Convert unfinished or broken (no .exe). Delete this folder and Convert again."
+        )
     size_b = int(entry.get("sizeBytes") or 0)
     out = dict(entry)
     out.update(
@@ -833,7 +999,10 @@ def _refresh_cached_entry(entry: dict[str, Any]) -> dict[str, Any] | None:
             "folderName": path.name,
             "sizeBytes": size_b,
             "sizeLabel": format_size_gb(size_b) if size_b else (entry.get("sizeLabel") or ""),
-            "lastPlayedAt": (load_sidecar(path).get("lastPlayedAt") or entry.get("lastPlayedAt") or ""),
+            "lastPlayedAt": (side.get("lastPlayedAt") or entry.get("lastPlayedAt") or ""),
+            **cfields,
+            "convertStatus": status,
+            "playable": bool(exe) and status in ("", CONVERT_STATUS_OK),
         }
     )
     return out
@@ -923,6 +1092,16 @@ def has_portable_metadata(game_dir: Path) -> bool:
     return (Path(game_dir) / SIDECAR_NAME).is_file()
 
 
+def _convert_fields_from_side(side: dict) -> dict[str, Any]:
+    status = str(side.get("convertStatus") or "").strip().lower()
+    return {
+        "convertStatus": status,
+        "convertPhase": str(side.get("convertPhase") or ""),
+        "convertError": str(side.get("convertError") or ""),
+        "playable": False,  # set by caller when exe exists
+    }
+
+
 def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None:
     """Build a library card from sidecar/art only. No folder walk, no downloads."""
     game_dir = Path(game_dir)
@@ -940,6 +1119,15 @@ def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None
             backdrop_rel = f"{ART_DIR_NAME}/{BACKDROP_NAME}"
         elif cover_rel:
             backdrop_rel = cover_rel
+    status = str(side.get("convertStatus") or "").strip().lower()
+    incomplete = status in CONVERT_INCOMPLETE_STATUSES or (
+        kind == "converted"
+        and (
+            str(side.get("kind") or "") == "converted"
+            or bool(side.get("sourceGameRoot"))
+        )
+        and not _find_exe(game_dir)
+    )
     if not side and kind == "converted" and not _find_exe(game_dir):
         return None
     if not side and kind == "unconverted" and not (
@@ -947,12 +1135,22 @@ def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None
     ):
         return None
     exe = _find_exe(game_dir) if kind == "converted" else None
-    if kind == "converted" and exe is None:
+    if kind == "converted" and exe is None and not incomplete and not side:
         return None
+    if kind == "converted" and exe is None and not incomplete:
+        # Sidecar-only under Converted without status → treat as unfinished stub
+        if side.get("sourceGameRoot") or str(side.get("kind") or "") == "converted":
+            incomplete = True
+            if not status:
+                status = CONVERT_STATUS_FAILED
+        else:
+            return None
     gid = stable_id(game_dir)
     cover_url, backdrop_url = _cover_urls(game_dir, gid, cover_rel, backdrop_rel)
     size_b = int(side.get("sizeBytes") or 0)
-    return {
+    if incomplete and not status:
+        status = CONVERT_STATUS_FAILED
+    entry = {
         "id": gid,
         "kind": kind,
         "title": str(side.get("title") or game_dir.name),
@@ -969,7 +1167,17 @@ def _entry_from_sidecar_fast(game_dir: Path, kind: str) -> dict[str, Any] | None
         "folderName": game_dir.name,
         "sizeBytes": size_b,
         "sizeLabel": format_size_gb(size_b) if size_b else "",
+        "convertStatus": status,
+        "convertPhase": str(side.get("convertPhase") or ""),
+        "convertError": str(side.get("convertError") or "")
+        or (
+            "Convert unfinished or broken (no .exe). Delete this folder and Convert again."
+            if incomplete
+            else ""
+        ),
+        "playable": bool(exe) and status in ("", CONVERT_STATUS_OK),
     }
+    return entry
 
 
 def _library_fingerprint(
@@ -1004,6 +1212,9 @@ def list_game_dirs(
                 converted_dirs.append(child)
             elif is_unconverted_dir(child):
                 unconverted_dirs.append(child)
+            elif _quick_classify_child(child) == "converted":
+                # Incomplete / failed convert stubs (sidecar, no exe yet)
+                converted_dirs.append(child)
 
     if unconv_root and unconv_root.is_dir():
         for child in list_child_dirs(unconv_root):
@@ -1013,6 +1224,9 @@ def list_game_dirs(
             elif is_unconverted_dir(child):
                 if not any(c.resolve() == child.resolve() for c in unconverted_dirs):
                     unconverted_dirs.append(child)
+            elif _quick_classify_child(child) == "converted":
+                if not any(c.resolve() == child.resolve() for c in converted_dirs):
+                    converted_dirs.append(child)
     return converted_dirs, unconverted_dirs
 
 
@@ -1051,12 +1265,23 @@ def _quick_classify_child(child: Path) -> str | None:
         return None
     if _find_exe(child) and ((child / "libs").is_dir() or (child / "app0").is_dir()):
         return "converted"
-    if (
-        (child / SIDECAR_NAME).is_file()
-        or (child / ART_DIR_NAME / COVER_NAME).is_file()
-        or (child / "sce_sys").is_dir()
+    side = load_sidecar(child) if (child / SIDECAR_NAME).is_file() else {}
+    status = str(side.get("convertStatus") or "").strip().lower()
+    looks_like_dump = (
+        (child / "sce_sys").is_dir()
         or (child / "app0" / "sce_sys").is_dir()
+        or (child / "sce_module").is_dir()
+        or (child / "sce_modules").is_dir()
+        or (child / "eboot.bin").is_file()
+    )
+    # Incomplete / failed converts (or legacy stubs) stay under Converted — not Unconverted
+    if (
+        status in CONVERT_INCOMPLETE_STATUSES
+        or str(side.get("kind") or "") == "converted"
+        or (side.get("sourceGameRoot") and not looks_like_dump)
     ):
+        return "converted"
+    if looks_like_dump:
         return "unconverted"
     return None
 
@@ -1735,20 +1960,14 @@ def prepare_convert_paths(
     conv = Path(converted_root)
     if not str(converted_root or "").strip():
         raise ValueError("Set Converted Game Folder in Settings first.")
-    conv.mkdir(parents=True, exist_ok=True)
+    # Only ensure the Converted root exists — the game output folder is created
+    # when Convert actually starts (begin_convert_sidecar), not on prepare.
+    try:
+        conv.mkdir(parents=True, exist_ok=True)
+    except OSError as e:
+        raise ValueError(f"Cannot create Converted Game Folder {conv}: {e}") from e
     output_dir = conv / folder
-    output_dir.mkdir(parents=True, exist_ok=True)
-    # Seed sidecar in output early so art can land there after convert
-    save_sidecar(
-        output_dir,
-        {
-            "title": inspected.get("title") or label,
-            "titleId": inspected.get("titleId") or "",
-            "version": inspected.get("version") or "",
-            "sourceGameRoot": str(game_root.resolve()),
-        },
-    )
-    # Copy local dump art + download cover into the unconverted game folder
+    # Copy local dump art + download cover into the unconverted game folder only
     try:
         resolve_artwork_for_game(
             game_root,
@@ -1807,8 +2026,150 @@ def finalize_converted_game(output_dir: Path, game_root: Path | None = None) -> 
             "version": inspected.get("version") or "",
             "exeName": exe.name if exe else "app.exe",
             "kind": "converted",
+            "convertStatus": CONVERT_STATUS_OK,
+            "convertPhase": "done",
+            "convertError": "",
+            "convertFinishedAt": datetime.now(timezone.utc).isoformat(),
+            **(
+                {"sourceGameRoot": str(Path(game_root).resolve())}
+                if game_root and Path(game_root).is_dir()
+                else {}
+            ),
         },
     )
+
+
+def delete_game_folder(
+    target: str | Path,
+    converted_root: str = "",
+    unconverted_root: str = "",
+    *,
+    elevate_if_needed: bool = True,
+) -> dict[str, Any]:
+    """Delete a game folder under library roots. May UAC-elevate on Access Denied."""
+    path = Path(target)
+    try:
+        resolved = path.resolve()
+    except Exception:
+        resolved = path
+    if not path_allowed(resolved, converted_root, unconverted_root):
+        return {
+            "ok": False,
+            "error": "Folder is outside your Converted / Unconverted Game folders.",
+            "elevated": False,
+        }
+    # Never delete the configured roots themselves
+    for root in (converted_root, unconverted_root):
+        if not str(root or "").strip():
+            continue
+        try:
+            if resolved == Path(root).resolve():
+                return {
+                    "ok": False,
+                    "error": "Refusing to delete the library root folder.",
+                    "elevated": False,
+                }
+        except Exception:
+            continue
+    if not resolved.exists():
+        return {"ok": True, "elevated": False, "alreadyGone": True, "path": str(resolved)}
+
+    def _gone() -> bool:
+        return not resolved.exists()
+
+    try:
+        shutil.rmtree(resolved)
+        if _gone():
+            return {"ok": True, "elevated": False, "path": str(resolved)}
+    except OSError as e:
+        winerr = getattr(e, "winerror", None)
+        access_denied = winerr in (5, 32) or isinstance(e, PermissionError)
+        if not elevate_if_needed or not access_denied:
+            return {"ok": False, "error": str(e), "elevated": False, "path": str(resolved)}
+
+    # Elevate: RunAs delete-folder.ps1 (bundled beside exe / in PyInstaller _MEIPASS)
+    script_candidates = [
+        Path(__file__).resolve().parent / "delete-folder.ps1",
+        Path(sys.executable).resolve().parent / "delete-folder.ps1",
+    ]
+    if getattr(sys, "frozen", False):
+        meipass = getattr(sys, "_MEIPASS", None)
+        if meipass:
+            script_candidates.insert(0, Path(meipass) / "delete-folder.ps1")
+    script = next((p for p in script_candidates if p.is_file()), script_candidates[-1])
+    if not script.is_file():
+        return {
+            "ok": False,
+            "error": "delete-folder.ps1 missing; cannot elevate.",
+            "elevated": False,
+            "path": str(resolved),
+        }
+    try:
+        # -Wait so we know the result; UAC prompt appears for this task only
+        cmd = (
+            f"Start-Process -FilePath powershell -Verb RunAs -Wait -PassThru "
+            f"-ArgumentList '-NoProfile -ExecutionPolicy Bypass -File \"{script}\" "
+            f"-Target \"{resolved}\"' | Select-Object -ExpandProperty ExitCode"
+        )
+        proc = subprocess.run(
+            ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=600,
+            shell=False,
+        )
+        code_txt = (proc.stdout or "").strip().splitlines()
+        exit_code = int(code_txt[-1]) if code_txt and code_txt[-1].strip().lstrip("-").isdigit() else proc.returncode
+        if _gone():
+            return {"ok": True, "elevated": True, "path": str(resolved)}
+        return {
+            "ok": False,
+            "error": (
+                f"Admin delete did not remove the folder (exit {exit_code}). "
+                "Close programs using files inside it, then try again."
+            ),
+            "elevated": True,
+            "path": str(resolved),
+        }
+    except Exception as e:
+        return {
+            "ok": False,
+            "error": f"Elevated delete failed: {e}",
+            "elevated": True,
+            "path": str(resolved),
+        }
+
+
+def drop_library_entry(path: str | Path) -> None:
+    """Remove a path from the in-memory + on-disk library cache after delete."""
+    try:
+        key = str(Path(path).resolve()).lower()
+    except Exception:
+        key = str(path).lower()
+    data = get_last_scan()
+    changed = False
+    for bucket in ("converted", "unconverted"):
+        kept = []
+        for g in data.get(bucket) or []:
+            try:
+                gp = str(Path(str(g.get("path") or "")).resolve()).lower()
+            except Exception:
+                gp = str(g.get("path") or "").lower()
+            if gp == key:
+                changed = True
+                continue
+            kept.append(g)
+        data[bucket] = kept
+    if changed:
+        data["fingerprint"] = _library_fingerprint(
+            data.get("converted") or [],
+            data.get("unconverted") or [],
+            list(_pending_new),
+        )
+        _finalize_totals(data)
+        _apply_scan_result(data)
 
 
 def mark_played(game_dir: Path) -> None:

@@ -82,6 +82,7 @@ $addData = @(
     "$(Join-Path $Root 'app\templates');templates",
     "$(Join-Path $Root 'app\static');static",
     "$(Join-Path $Root 'app\bootstrap.ps1');.",
+    "$(Join-Path $Root 'app\delete-folder.ps1');.",
     "$(Join-Path $Root 'app\setup_engine.py');.",
     "$(Join-Path $Root 'app\library.py');.",
     "$(Join-Path $Root 'app\game_session.py');.",

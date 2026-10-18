@@ -4,7 +4,7 @@ Windows desktop launcher for **[AnyPS5](https://github.com/boykopovar/AnyPS5)**.
 
 This repo is the **launcher only**. It installs tools, clones AnyPS5 next to the app, builds the converter, manages a game library, converts titles, and starts them from a local UI.
 
-**Current release:** [v1.4.2](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
+**Current release:** [v1.4.3](https://github.com/Tiberius1OOO/AnyPS5-Launcher/releases/latest)
 
 ---
 
@@ -204,6 +204,12 @@ Output: `dist\release\AnyPS5-Launcher\` and `AnyPS5-Launcher-windows.zip`.
 ---
 
 ## Changelog (launcher)
+
+### v1.4.3
+
+- Library: Delete from the game card menu, with optional UAC elevate when Windows blocks the folder
+- Convert status in the library (in progress / OK / failed or unfinished); output folder created only when Convert starts
+- Bugfixes: ignore unwrap SELF backups (*.selfbak and similar); tighter Convert hard-fail rules; MinGW and library status false positives
 
 ### v1.4.2
 

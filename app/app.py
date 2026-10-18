@@ -578,6 +578,20 @@ def _failure_snippets(lines: list[str], limit: int = 12) -> list[str]:
         "-- detecting ",
         "-- found ",
     )
+    # Launcher structured ERROR blocks / footer — not the underlying tool cause.
+    chrome_prefixes = (
+        "what failed:",
+        "why:",
+        "what to do:",
+        "skipped examples:",
+        "likely cause",
+        "full log file",
+        "same log beside",
+        "log folder:",
+        "the line 'error:",
+        "=== aborted",
+        "=== done",
+    )
     strong_keys = (
         "cmake error",
         "could not find",
@@ -604,6 +618,17 @@ def _failure_snippets(lines: list[str], limit: int = 12) -> list[str]:
             continue
         low = s.lower()
         if low.startswith(noise_prefixes) and "cmake error" not in low:
+            continue
+        if any(low.startswith(p) for p in chrome_prefixes):
+            continue
+        # Relinker / AnyPS5 tools use "FAIL: …" on stderr (merged into job log).
+        if low.startswith("fail:"):
+            strong.append(s)
+            continue
+        # Our append_job_error_explain titles look like "ERROR: …" then "What failed:".
+        if low.startswith("error:") and any(
+            (lines[j].strip().lower().startswith("what failed:") for j in range(i + 1, min(i + 6, len(lines))))
+        ):
             continue
         if "looking for " in low and " - not found" in low:
             continue
@@ -638,16 +663,19 @@ def _failure_snippets(lines: list[str], limit: int = 12) -> list[str]:
     return nonempty[-min(limit, 8) :]
 
 
-def note_job_failure_hints() -> None:
+def note_job_failure_hints(*, job_kind: str = "") -> None:
     """Append a short summary + log path after a failed job."""
     with _job_lock:
         lines = list(_job.get("lines") or [])
         log_path = str(_job.get("logPath") or LAST_JOB_LOG)
         hist = str(_job.get("logHistoryPath") or "").strip()
         game_log = str(_job.get("logGamePath") or "").strip()
+        kind = str(job_kind or _job.get("kind") or "").strip()
     snippets = _failure_snippets(lines)
     append_job("")
-    append_job("The line 'ERROR: exit code …' only means the command failed.")
+    # Convert never prints "ERROR: exit code …" — that sentence is for Setup/Build only.
+    if kind.lower() != "convert":
+        append_job("The line 'ERROR: exit code …' only means the command failed.")
     if snippets:
         append_job("Likely cause (from earlier output):")
         for s in snippets:
@@ -1233,6 +1261,120 @@ def _dir_has_guest_modules(path: Path) -> bool:
         return any(path.glob("*.prx")) or any(path.glob("*.elf"))
     except OSError:
         return False
+
+
+_RE_SELF_SKIP = re.compile(
+    r"^Skipping SELF container:\s*(.+?)\s*\(\s*unwrap it before relinking\s*\)\s*$",
+    re.IGNORECASE,
+)
+_RE_CONVERTED_MODULES = re.compile(r"^Converted modules:\s*(\d+)\s*$", re.IGNORECASE)
+_MODULE_BACKUP_NAME_RE = re.compile(
+    r"(?:\.selfbak|\.esbak|\.prxbak|\.sprxbak|\.bak|\.orig|\.old|\.backup|prxbak|sprxbak)$",
+    re.IGNORECASE,
+)
+
+
+def _looks_like_module_backup_name(name: str) -> bool:
+    """Unwrap/dumper leftovers: libc.prx.selfbak, libX.prx.esbak, libX.prxbak, …"""
+    return bool(_MODULE_BACKUP_NAME_RE.search(str(name or "").strip()))
+
+
+def _self_skip_has_unwrapped_sibling(
+    skip_rel: str,
+    content_root: Path,
+    skipped_rels: set[str],
+) -> bool:
+    """
+    True when the skipped SELF file is a backup beside a real module that was not skipped.
+
+    Relinker scans every file in module dirs; unwrap tools leave *.selfbak / *.esbak /
+    *.prxbak next to the decrypted .prx. Those skips are warnings upstream, not failures.
+    """
+    rel_norm = str(skip_rel or "").replace("\\", "/").strip().lstrip("./")
+    if not rel_norm:
+        return False
+    name = Path(rel_norm).name
+    parent_rel = str(Path(rel_norm).parent).replace("\\", "/")
+    parent = content_root if parent_rel in (".", "") else content_root / parent_rel
+    if not parent.is_dir():
+        return False
+    name_low = name.lower()
+    skipped_norm = {
+        s.replace("\\", "/").strip().lstrip("./").lower() for s in skipped_rels
+    }
+    try:
+        siblings = [p for p in parent.iterdir() if p.is_file()]
+    except OSError:
+        return False
+    for sib in siblings:
+        sib_low = sib.name.lower()
+        if sib_low == name_low:
+            continue
+        if not name_low.startswith(sib_low) or len(name_low) <= len(sib_low):
+            continue
+        rest = name_low[len(sib_low) :]
+        if not (rest.startswith(".") or "bak" in rest):
+            continue
+        if _looks_like_module_backup_name(sib.name):
+            continue
+        sib_rel = sib.name if parent_rel in (".", "") else f"{parent_rel}/{sib.name}"
+        if sib_rel.replace("\\", "/").lower() in skipped_norm:
+            continue
+        return True
+    return False
+
+
+def _filter_self_skips(
+    skip_rels: list[str],
+    content_root: Path,
+) -> tuple[list[str], list[str]]:
+    """Split SELF skips into (fatal, harmless_backup)."""
+    skipped_set = set(skip_rels)
+    fatal: list[str] = []
+    harmless: list[str] = []
+    for rel in skip_rels:
+        if _self_skip_has_unwrapped_sibling(rel, content_root, skipped_set):
+            harmless.append(rel)
+        else:
+            fatal.append(rel)
+    return fatal, harmless
+
+
+def _module_candidate_files(
+    content_root: Path,
+    extra_module_dirs: list[str] | None = None,
+) -> list[Path]:
+    """Real guest modules on disk (ignores unwrap backup names)."""
+    dirs = [
+        content_root / "sce_module",
+        content_root / "sce_modules",
+        content_root / "prx",
+    ]
+    for rel in extra_module_dirs or []:
+        dirs.append(content_root / rel)
+    out: list[Path] = []
+    seen: set[str] = set()
+    for d in dirs:
+        if not d.is_dir():
+            continue
+        try:
+            files = list(d.iterdir())
+        except OSError:
+            continue
+        for p in files:
+            if not p.is_file():
+                continue
+            if _looks_like_module_backup_name(p.name):
+                continue
+            low = p.name.lower()
+            if not low.endswith((".prx", ".sprx", ".elf")):
+                continue
+            key = str(p.resolve()) if p.exists() else str(p)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(p)
+    return out
 
 
 def find_extra_module_dirs(content_root: Path) -> list[str]:
@@ -2180,14 +2322,21 @@ def api_convert():
             return jsonify({"ok": False, "error": "Please set a game folder."}), 400
         if not game_root.is_dir():
             return jsonify({"ok": False, "error": f"Game folder not found: {game_root}"}), 400
+        # Do not create the game output folder here — only when Convert worker starts.
+        # Verify the parent Converted root is usable.
         try:
-            output_dir.mkdir(parents=True, exist_ok=True)
+            parent = output_dir.parent
+            if str(parent) and str(parent) != ".":
+                parent.mkdir(parents=True, exist_ok=True)
+            probe = parent / ".anyps5-write-test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink(missing_ok=True)
         except OSError as e:
             return jsonify(
                 {
                     "ok": False,
                     "error": (
-                        f"Cannot create output folder {output_dir}: {e}. "
+                        f"Cannot write under {output_dir.parent}: {e}. "
                         "Pick a writable Converted Games folder in Settings, "
                         f"or leave output empty to use {game_root / 'anyps5-out'}."
                     ),
@@ -2279,10 +2428,45 @@ def api_convert():
         return jsonify({"ok": False, "error": f"Convert setup failed: {e}"}), 500
 
     def worker() -> None:
+        from library import (
+            begin_convert_sidecar,
+            mark_convert_failed,
+            update_convert_sidecar,
+        )
+
         game_label = _game_log_label(game_root)
         set_job(True, kind="Convert", ok=None, log_label=game_label)
-        game_log = _attach_game_convert_log(output_dir, game_label)
         packaging_steps = 4
+        ok = True
+        self_skip_rels: list[str] = []
+        self_skip_line_by_rel: dict[str, str] = {}
+        modules_converted_count: int | None = None
+        convert_folder_ready = False
+        try:
+            begin_convert_sidecar(
+                output_dir,
+                game_root=game_root,
+                title=game_label,
+            )
+            convert_folder_ready = True
+            update_convert_sidecar(output_dir, phase="relinker", status="in_progress")
+        except OSError as e:
+            ok = False
+            append_job_error_explain(
+                "Cannot create output folder",
+                what_failed=f"The launcher could not create: {output_dir}",
+                why=str(e),
+                what_to_do=[
+                    "Pick a writable Converted Games folder in Settings, "
+                    f"or leave output empty to use {game_root / 'anyps5-out'}.",
+                ],
+            )
+            note_job_failure_hints(job_kind="Convert")
+            append_job("=== aborted ===")
+            set_job(False, ok=False)
+            return
+
+        game_log = _attach_game_convert_log(output_dir, game_label)
         set_job_progress(
             phase="relinker",
             label="Step 0/4 — Relinker converting binary (not done yet)",
@@ -2311,9 +2495,6 @@ def api_convert():
             "(system libs → game files → MinGW DLLs). Do not start the game until you see "
             "'=== done ==='."
         )
-        ok = True
-        self_skips: list[str] = []
-        modules_converted_zero = False
         try:
             proc = subprocess.Popen(
                 args,
@@ -2330,11 +2511,20 @@ def api_convert():
             for line in proc.stdout:
                 text = line.rstrip()
                 append_job(text)
-                low = text.lower()
-                if "skipping self container" in low:
-                    self_skips.append(text.strip())
-                if "converted modules: 0" in low:
-                    modules_converted_zero = True
+                stripped = text.strip()
+                low = stripped.lower()
+                m_skip = _RE_SELF_SKIP.match(stripped)
+                if m_skip:
+                    rel = m_skip.group(1).strip().replace("\\", "/")
+                    if rel and rel not in self_skip_line_by_rel:
+                        self_skip_rels.append(rel)
+                        self_skip_line_by_rel[rel] = stripped
+                m_mods = _RE_CONVERTED_MODULES.match(stripped)
+                if m_mods:
+                    try:
+                        modules_converted_count = int(m_mods.group(1))
+                    except ValueError:
+                        pass
                 if "conversion complete" in low or "write output" in low:
                     set_job_progress(
                         phase="relinker",
@@ -2352,48 +2542,97 @@ def api_convert():
                     ),
                     why=(
                         "Bad input, corrupt module, or a converter bug. "
-                        "The last ERROR / fatal line above is the real cause."
+                        "Look for a FAIL: line from the relinker above."
                     ),
                     what_to_do=[
-                        "Scroll up to the first red/fatal line from relinker, fix that input, then Convert again.",
+                        "Scroll up to the first FAIL: / fatal line from relinker, fix that input, then Convert again.",
                         "If unsure, send logs/convert-<game>-*.log from the Console Open log file path.",
                     ],
                 )
-            elif self_skips:
-                ok = False
-                append_job_error_explain(
-                    "Convert cannot use encrypted SELF modules",
-                    what_failed=(
-                        f"Relinker skipped {len(self_skips)} module(s) because they "
-                        "are still SELF-wrapped (encrypted)."
-                    ),
-                    why=(
-                        "A dump that was not decrypted yet keeps modules as SELF. "
-                        "The converter needs unwrapped ELF modules."
-                    ),
-                    what_to_do=[
-                        "Decrypt / unwrap the game (SELF -> ELF) before Convert.",
-                        "Confirm eboot and files under sce_module (and Media/Modules if Unity) are unwrapped.",
-                        "Run Convert again on the decrypted folder.",
-                    ],
-                    examples=self_skips,
-                    examples_label="Skipped examples:",
-                )
-            elif modules_converted_zero:
-                ok = False
-                append_job_error_explain(
-                    "No modules were converted",
-                    what_failed="Relinker finished, but Converted modules: 0.",
-                    why=(
-                        "Usually every guest module was still SELF (encrypted) "
-                        "or the module paths were wrong."
-                    ),
-                    what_to_do=[
-                        "Decrypt / unwrap first, then confirm sce_module is under "
-                        "the same game root as eboot.bin, then Convert again.",
-                    ],
+                mark_convert_failed(
+                    output_dir,
+                    "Relinker failed — see Console log.",
+                    phase="relinker",
                 )
             else:
+                fatal_skips, harmless_skips = _filter_self_skips(
+                    self_skip_rels, game_root
+                )
+                if harmless_skips:
+                    append_job(
+                        f"NOTE: Ignoring {len(harmless_skips)} SELF backup file(s) "
+                        "left by unwrap (real modules were converted)."
+                    )
+                    for rel in harmless_skips[:8]:
+                        append_job(f"  backup skip: {rel}")
+                    if len(harmless_skips) > 8:
+                        append_job(f"  … and {len(harmless_skips) - 8} more")
+                if fatal_skips:
+                    ok = False
+                    examples = [
+                        self_skip_line_by_rel.get(rel, f"Skipping SELF container: {rel}")
+                        for rel in fatal_skips
+                    ]
+                    append_job_error_explain(
+                        "Convert cannot use encrypted SELF modules",
+                        what_failed=(
+                            f"Relinker skipped {len(fatal_skips)} module(s) because they "
+                            "are still SELF-wrapped (encrypted)."
+                        ),
+                        why=(
+                            "A dump that was not decrypted yet keeps modules as SELF. "
+                            "The converter needs unwrapped ELF modules."
+                        ),
+                        what_to_do=[
+                            "Decrypt / unwrap the game (SELF -> ELF) before Convert.",
+                            "Confirm eboot and files under sce_module (and Media/Modules if Unity) are unwrapped.",
+                            "Run Convert again on the decrypted folder.",
+                        ],
+                        examples=examples,
+                        examples_label="Skipped examples:",
+                    )
+                    mark_convert_failed(
+                        output_dir,
+                        "Encrypted SELF modules — decrypt / unwrap before Convert.",
+                        phase="relinker",
+                    )
+                elif modules_converted_count == 0:
+                    candidates = _module_candidate_files(game_root, extra_module_dirs)
+                    if candidates:
+                        ok = False
+                        append_job_error_explain(
+                            "No modules were converted",
+                            what_failed="Relinker finished, but Converted modules: 0.",
+                            why=(
+                                "Module files are present, but none were converted — "
+                                "often still SELF (encrypted) or wrong module paths."
+                            ),
+                            what_to_do=[
+                                "Decrypt / unwrap first, then confirm sce_module is under "
+                                "the same game root as eboot.bin, then Convert again.",
+                            ],
+                            examples=[
+                                (
+                                    str(p.relative_to(game_root)).replace("\\", "/")
+                                    if str(p).lower().startswith(str(game_root).lower())
+                                    else p.name
+                                )
+                                for p in candidates[:12]
+                            ],
+                            examples_label="Module files found:",
+                        )
+                        mark_convert_failed(
+                            output_dir,
+                            "Converted modules: 0 — decrypt / check module paths.",
+                            phase="relinker",
+                        )
+                    else:
+                        append_job(
+                            "NOTE: Converted modules: 0 (no guest .prx/.elf in module "
+                            "folders — OK for some single-binary titles)."
+                        )
+            if ok:
+                update_convert_sidecar(output_dir, phase="system_libs")
                 append_job("")
                 append_job("=" * 60)
                 append_job("Relinker finished converting the binary.")
@@ -2461,6 +2700,7 @@ def api_convert():
                 set_job_progress(rate="", busy=False)
 
                 # ---- 2/4 game resources ----
+                update_convert_sidecar(output_dir, phase="game_files")
                 set_job_progress(
                     phase="game_files",
                     label="Step 2/4 — Copying game files into app0",
@@ -2568,6 +2808,7 @@ def api_convert():
                     append_job(f"Removed {removed_raw} raw (unconverted) .prx under app0")
 
                 # ---- 3/4 MinGW DLLs (required — prevents GetLastError 126) ----
+                update_convert_sidecar(output_dir, phase="mingw")
                 set_job_progress(
                     phase="mingw",
                     label="Step 3/4 — Copying MinGW runtime DLLs (prevents error 126)",
@@ -2620,13 +2861,18 @@ def api_convert():
                         append_job(f"  VERIFY OK  libs\\{name}  ({sz} bytes)")
                     else:
                         append_job(f"  VERIFY MISSING  libs\\{name}")
-                if still_missing or dll_missing:
+                if dll_missing and not still_missing:
+                    append_job(
+                        "NOTE: MinGW DLL source path(s) missing on this PC, but libs\\ "
+                        "already has the required DLLs — continuing."
+                    )
+                if still_missing:
                     ok = False
-                    missing_names = ", ".join(still_missing or dll_missing)
+                    missing_names = ", ".join(still_missing)
                     append_job_error_explain(
                         "MinGW runtime DLLs missing",
                         what_failed=(
-                            f"Could not place {missing_names} next to the game "
+                            f"libs\\ is missing {missing_names} after packaging "
                             f"(looked under {WINLIBS_BIN} and gcc on PATH)."
                         ),
                         why=(
@@ -2637,8 +2883,14 @@ def api_convert():
                             "Run Setup -> Install / repair (WinLibs), then Build, then Convert again.",
                         ],
                     )
+                    mark_convert_failed(
+                        output_dir,
+                        f"MinGW DLLs missing: {missing_names}",
+                        phase="mingw",
+                    )
 
                 # ---- 4/4 finish ----
+                update_convert_sidecar(output_dir, phase="finish")
                 set_job_progress(
                     phase="finish",
                     label="Step 4/4 — Finishing (input config + save paths)",
@@ -2672,13 +2924,23 @@ def api_convert():
                 cfg2["lastOutputExe"] = str(out_exe)
                 cfg2["outputName"] = out_name
                 save_config(cfg2)
-                try:
-                    from library import finalize_converted_game
+                # Never call finalize on a failed convert — it would overwrite
+                # convertStatus=failed with ok.
+                if ok:
+                    try:
+                        from library import finalize_converted_game, mark_convert_ok
 
-                    finalize_converted_game(output_dir, game_root)
-                    append_job("[4/4] Library metadata + artwork written into game folder")
-                except Exception as e:
-                    append_job(f"[WARN] Library metadata: {e}")
+                        finalize_converted_game(output_dir, game_root)
+                        append_job(
+                            "[4/4] Library metadata + artwork written into game folder"
+                        )
+                    except Exception as e:
+                        append_job(f"[WARN] Library metadata: {e}")
+                        # Packaging succeeded; keep the game playable in the library.
+                        try:
+                            mark_convert_ok(output_dir)
+                        except Exception as e2:
+                            append_job(f"[WARN] Could not mark convert OK: {e2}")
                 append_job("")
                 append_job("=" * 60)
                 append_job("PACKAGING MANIFEST SUMMARY")
@@ -2735,8 +2997,19 @@ def api_convert():
                     "Try Convert again. If it keeps failing, send the convert-*.log from Console.",
                 ],
             )
+            if convert_folder_ready:
+                mark_convert_failed(output_dir, str(e)[:500], phase="crashed")
         if not ok:
-            note_job_failure_hints()
+            if convert_folder_ready:
+                from library import get_convert_status
+
+                if get_convert_status(output_dir) == "in_progress":
+                    mark_convert_failed(
+                        output_dir,
+                        "Convert aborted — see Console log.",
+                        phase="aborted",
+                    )
+            note_job_failure_hints(job_kind="Convert")
         append_job("=== done ===" if ok else "=== aborted ===")
         set_job(False, ok=ok)
 
@@ -2988,6 +3261,49 @@ def api_library_scan():
             "message": "Scan already running" if not started else msg,
         }
     )
+
+
+@app.post("/api/library/delete")
+def api_library_delete():
+    """Delete a converted or unconverted game folder (UAC elevate if Access Denied)."""
+    from library import delete_game_folder, drop_library_entry, find_entry_by_id, get_last_scan
+
+    if _job["running"]:
+        return jsonify({"ok": False, "error": "Wait for the current job to finish."}), 409
+    cfg = load_config()
+    data = request.get_json(silent=True) or {}
+    entry_id = str(data.get("id") or "").strip()
+    path = str(data.get("path") or "").strip()
+    elevate = data.get("elevate", True)
+    if isinstance(elevate, str):
+        elevate = elevate.strip().lower() in ("1", "true", "yes", "on")
+    if entry_id and not path:
+        entry = find_entry_by_id(entry_id)
+        if not entry:
+            # Fall back to last scan
+            for bucket in ("converted", "unconverted"):
+                for g in get_last_scan().get(bucket) or []:
+                    if str(g.get("id") or "") == entry_id:
+                        entry = g
+                        break
+        if entry:
+            path = str(entry.get("path") or "")
+    if not path:
+        return jsonify({"ok": False, "error": "Missing game path or id."}), 400
+    applog.info("library delete", path)
+    result = delete_game_folder(
+        path,
+        str(cfg.get("convertedGamesRoot") or ""),
+        str(cfg.get("unconvertedGamesRoot") or ""),
+        elevate_if_needed=bool(elevate),
+    )
+    if result.get("ok"):
+        try:
+            drop_library_entry(path)
+        except Exception as e:
+            applog.warning("library delete cache update", str(e))
+        return jsonify({"ok": True, **result, "library": get_last_scan()})
+    return jsonify({"ok": False, **result}), 400
 
 
 @app.post("/api/library/prepare-convert")

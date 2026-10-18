@@ -292,34 +292,72 @@
     applyBarFill(fill, pct, running);
   }
 
+  function libraryConvertStatus(game) {
+    return String((game && game.convertStatus) || "").toLowerCase();
+  }
+
+  function libraryIsBroken(game, kind) {
+    if (kind !== "converted") return false;
+    const st = libraryConvertStatus(game);
+    if (st === "failed" || st === "broken" || st === "unfinished" || st === "in_progress") return true;
+    if (game && game.playable === false && !game.exePath) return true;
+    if (kind === "converted" && !(game && game.exePath)) return true;
+    return false;
+  }
+
   function libraryCardHtml(game, kind) {
     const fallbackText = escapeHtml(game.title || game.folderName || "Game");
     const cover = game.coverUrl
       ? `<img src="${escapeHtml(game.coverUrl)}" alt="${fallbackText}" loading="lazy" data-fallback="${fallbackText}" onerror="this.onerror=null;var t=this.getAttribute('data-fallback')||'Game';var d=document.createElement('div');d.className='library-cover-fallback';d.textContent=t;this.replaceWith(d);" />`
       : `<div class="library-cover-fallback">${fallbackText}</div>`;
-    const badge = kind === "converted"
-      ? `<span class="library-badge playable">Play</span>`
-      : `<span class="library-badge needs-convert">Convert</span>`;
-    const overlay = kind === "converted"
-      ? `<div class="library-play"><span>Play</span></div>`
-      : `<div class="library-play"><span>Convert</span></div>`;
+    const broken = libraryIsBroken(game, kind);
+    const st = libraryConvertStatus(game);
+    let badge;
+    if (kind !== "converted") {
+      badge = `<span class="library-badge needs-convert">Convert</span>`;
+    } else if (st === "in_progress") {
+      badge = `<span class="library-badge unfinished">Unfinished</span>`;
+    } else if (broken) {
+      badge = `<span class="library-badge broken">Broken</span>`;
+    } else {
+      badge = `<span class="library-badge playable">Play</span>`;
+    }
+    const overlayLabel = kind === "converted"
+      ? (broken ? (st === "in_progress" ? "Unfinished" : "Broken") : "Play")
+      : "Convert";
+    const overlay = `<div class="library-play"><span>${overlayLabel}</span></div>`;
     const meta = escapeHtml(game.titleId || game.folderName || "");
-    const backdrop = escapeHtml(game.backdropUrl || game.coverUrl || "");
     const pathAttr = encodeURIComponent(game.path || "");
     const titleAttr = escapeHtml(game.title || "");
     const backdropAttr = encodeURIComponent(game.backdropUrl || game.coverUrl || "");
+    const errHint = escapeHtml(game.convertError || "");
     return `
-      <button type="button" class="library-card" data-id="${escapeHtml(game.id)}" data-kind="${kind}"
-        data-path="${pathAttr}" data-title="${titleAttr}"
-        data-backdrop="${backdropAttr}" title="${titleAttr}">
-        <div class="library-cover">
-          ${badge}
-          ${cover}
-          ${overlay}
+      <div class="library-card-wrap" data-id="${escapeHtml(game.id)}" data-kind="${kind}"
+        data-path="${pathAttr}" data-title="${titleAttr}" data-broken="${broken ? "1" : "0"}">
+        <button type="button" class="library-card" data-id="${escapeHtml(game.id)}" data-kind="${kind}"
+          data-path="${pathAttr}" data-title="${titleAttr}"
+          data-backdrop="${backdropAttr}" data-broken="${broken ? "1" : "0"}"
+          title="${titleAttr}${errHint ? " — " + errHint : ""}">
+          <div class="library-cover">
+            ${badge}
+            ${cover}
+            ${overlay}
+          </div>
+        </button>
+        <div class="library-title-row">
+          <div class="library-title">${escapeHtml(game.title || "Untitled")}</div>
+          <div class="library-menu">
+            <button type="button" class="library-menu-btn" aria-label="More options" data-menu-for="${escapeHtml(game.id)}">⋮</button>
+            <div class="library-menu-drop" hidden>
+              <button type="button" class="library-menu-item" data-action="delete"
+                data-id="${escapeHtml(game.id)}" data-path="${pathAttr}" data-title="${titleAttr}">
+                Delete folder…
+              </button>
+            </div>
+          </div>
         </div>
-        <div class="library-title">${escapeHtml(game.title || "Untitled")}</div>
         <div class="library-meta">${meta}</div>
-      </button>`;
+      </div>`;
   }
 
   function renderLibrary(library) {
@@ -666,11 +704,84 @@
     }
   }
 
+  function closeAllLibraryMenus() {
+    document.querySelectorAll(".library-menu-drop").forEach((el) => {
+      el.hidden = true;
+    });
+  }
+
+  async function deleteLibraryGame(game) {
+    const title = game.title || game.folderName || "this game";
+    const path = game.path || "";
+    if (!path) {
+      toast("Missing folder path.", "error");
+      return;
+    }
+    const ok = window.confirm(
+      `Delete the entire folder for "${title}"?\n\n${path}\n\nThis cannot be undone.`
+    );
+    if (!ok) return;
+    try {
+      setBusy(true, "Deleting…");
+      const data = await api("/api/library/delete", {
+        method: "POST",
+        body: JSON.stringify({ id: game.id || "", path, elevate: true }),
+      });
+      if (data.library) renderLibrary(data.library);
+      else await loadLibrary(true);
+      toast(
+        data.elevated
+          ? `Deleted (admin): ${title}`
+          : `Deleted: ${title}`,
+        "ok"
+      );
+      clientLog("info", "Library folder deleted", path);
+    } catch (e) {
+      clientLog("error", "Library delete failed", e.message || String(e));
+      toast(e.message || "Delete failed", "error");
+    } finally {
+      setBusy(false);
+    }
+  }
+
   function bindLibraryGridClicks() {
     const root = $("tab-library");
     if (!root || root._libraryBound) return;
     root._libraryBound = true;
+    document.addEventListener("click", (ev) => {
+      if (!ev.target.closest || !ev.target.closest(".library-menu")) {
+        closeAllLibraryMenus();
+      }
+    });
     root.addEventListener("click", (ev) => {
+      const menuBtn = ev.target.closest && ev.target.closest(".library-menu-btn");
+      if (menuBtn) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        const drop = menuBtn.parentElement && menuBtn.parentElement.querySelector(".library-menu-drop");
+        const wasOpen = drop && !drop.hidden;
+        closeAllLibraryMenus();
+        if (drop && wasOpen) return;
+        if (drop) drop.hidden = false;
+        return;
+      }
+      const menuItem = ev.target.closest && ev.target.closest(".library-menu-item");
+      if (menuItem) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        closeAllLibraryMenus();
+        const action = menuItem.dataset.action || "";
+        const id = menuItem.dataset.id || "";
+        let path = "";
+        try { path = decodeURIComponent(menuItem.dataset.path || ""); } catch (_) { path = menuItem.dataset.path || ""; }
+        const title = menuItem.dataset.title || "";
+        const fromList = [...(libraryData.converted || []), ...(libraryData.unconverted || [])]
+          .find((g) => g.id === id);
+        const game = fromList || { id, path, title };
+        if (!game.path) game.path = path;
+        if (action === "delete") deleteLibraryGame(game);
+        return;
+      }
       const card = ev.target.closest && ev.target.closest(".library-card");
       if (!card) return;
       ev.preventDefault();
@@ -684,8 +795,17 @@
       const game = fromList || { id, path, title, kind };
       if (!game.path) game.path = path;
       clientLog("debug", "Library card click", `${kind} ${path || id}`);
-      if (kind === "converted") playLibraryGame(game);
-      else openUnconvertedForConvert(game);
+      if (kind === "converted") {
+        if (libraryIsBroken(game, kind) || card.dataset.broken === "1") {
+          const msg = game.convertError
+            || "This convert is unfinished or broken. Use ⋮ → Delete folder, then Convert again.";
+          toast(msg, "error");
+          return;
+        }
+        playLibraryGame(game);
+      } else {
+        openUnconvertedForConvert(game);
+      }
     });
     root.addEventListener("pointerover", (ev) => {
       const card = ev.target.closest && ev.target.closest(".library-card");
@@ -1187,6 +1307,7 @@
     const t = String(line || "").trimStart();
     return (
       /^ERROR:/i.test(t)
+      || /^FAIL:/i.test(t)
       || /^\[ABBRUCH\]/i.test(t)
       || /^What failed:/i.test(t)
       || /^Why:/i.test(t)
